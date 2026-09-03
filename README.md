@@ -78,8 +78,15 @@ Android’s "Phantom Process Killer" will terminate compiler and PRoot processes
 1. Open **Android Settings** > **Apps** > **Termux** > **App Battery Usage** > Select **Unrestricted**.
 2. Do the same for **Termux:X11** > Select **Unrestricted**.
 
-### 3. Open Termux & Acquire Wake-Lock
-On first launch, prevent Android from sleeping the network:
+### 3. Open Termux & Change Repo Mirror (Recommended)
+By default, Termux may select a slow or throttled default mirror. Set a fast mirror:
+```bash
+termux-change-repo
+```
+*(Select **Main repository** and choose a fast mirror like **Grimler** or **Cloudflare**).*
+
+### 4. Acquire Wake-Lock
+Prevent Android from sleeping the network:
 ```bash
 termux-wake-lock
 ```
