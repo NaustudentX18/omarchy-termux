@@ -129,24 +129,49 @@ log_succ "Termux host packages verified."
 log_step "Step 4/6: Bootstrapping Arch Linux (${TARGET_ARCH})"
 
 DISTRO_NAME="archlinux"
-if proot-distro list | grep -q "$DISTRO_NAME (installed)"; then
+if proot-distro list | grep -q "$DISTRO_NAME (installed)" || proot-distro list | grep -q "$DISTRO_NAME"; then
     log_succ "Arch Linux rootfs is already installed in proot-distro."
 else
     log_info "Downloading and deploying Arch Linux rootfs via proot-distro..."
-    proot-distro install "$DISTRO_NAME"
+    # Modern proot-distro uses Docker/OCI registries by default. Docker Hub 'archlinux'
+    # is amd64-only, so on aarch64 we provide the official Termux release rootfs tarball directly.
+    if [[ "$TARGET_ARCH" == "aarch64" ]]; then
+        ARCH_ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.17.3/archlinux-aarch64-pd-v4.17.3.tar.xz"
+        proot-distro install --name "$DISTRO_NAME" "$ARCH_ROOTFS_URL" || \
+        proot-distro install "$DISTRO_NAME"
+    else
+        proot-distro install "$DISTRO_NAME"
+    fi
     log_succ "Arch Linux base rootfs deployed."
 fi
 
-PROOT_ROOT="/data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/archlinux"
+# Locate PROOT_ROOT dynamically (supports both legacy installed-rootfs and modern containers/ layout)
+if [ -d "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/$DISTRO_NAME/rootfs" ]; then
+    PROOT_ROOT="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/$DISTRO_NAME/rootfs"
+elif [ -d "/data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/$DISTRO_NAME" ]; then
+    PROOT_ROOT="/data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/$DISTRO_NAME"
+else
+    # Fallback to searching for the rootfs
+    PROOT_ROOT=$(find /data/data/com.termux/files/usr/var/lib/proot-distro -type d -name "$DISTRO_NAME" 2>/dev/null | head -n 1)
+    if [ -d "$PROOT_ROOT/rootfs" ]; then
+        PROOT_ROOT="$PROOT_ROOT/rootfs"
+    fi
+fi
+
+if [ -z "$PROOT_ROOT" ] || [ ! -d "$PROOT_ROOT" ]; then
+    log_warn "Could not pinpoint rootfs directory directly; proceeding with proot-distro login commands."
+fi
 
 # Ensure robust DNS before entering PRoot
-log_info "Configuring PRoot DNS resolvers (Cloudflare + Google fallback)..."
-rm -f "$PROOT_ROOT/etc/resolv.conf" 2>/dev/null || true
-cat << 'DNS_EOF' > "$PROOT_ROOT/etc/resolv.conf"
+if [ -n "$PROOT_ROOT" ] && [ -d "$PROOT_ROOT/etc" ]; then
+    log_info "Configuring PRoot DNS resolvers (Cloudflare + Google fallback)..."
+    rm -f "$PROOT_ROOT/etc/resolv.conf" 2>/dev/null || true
+    cat << 'DNS_EOF' > "$PROOT_ROOT/etc/resolv.conf"
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 nameserver 8.8.8.8
 DNS_EOF
+fi
 
 # ------------------------------------------------------------------------------
 # 5. Inner Arch Linux Provisioning
