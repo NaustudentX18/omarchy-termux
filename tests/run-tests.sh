@@ -60,6 +60,7 @@ case "\$1" in
   install)
     echo "PD-INSTALL-ARGS: \$*" >> "$SB/log/pd.log"
     mkdir -p "$LEGACY_ROOTFS"/{etc/pacman.d,etc/pulse,etc/sudoers.d,root,home/omarchy,opt,usr/local/bin,tmp}
+    printf '[options]\nHoldPkg   = pacman glibc\n#DisableSandbox\n#DownloadUser = alpm\n' > "$LEGACY_ROOTFS/etc/pacman.conf"
     exit 0 ;;
   remove)
     rm -rf "$LEGACY_ROOTFS" "$SB/usr/var/lib/proot-distro/containers"
@@ -216,8 +217,8 @@ grep -q 'PD-INSTALL-ARGS: install --name archlinux' "$SB/log/pd.log" \
   && ok "aarch64 installs via official ALARM tarball (--name)" || bad "aarch64 did not use tarball install"
 grep -q 'archlinux-aarch64-pd-' "$SB/log/pd.log" \
   && ok "tarball URL passed to proot-distro" || bad "tarball URL missing from install args"
-grep -q '^DownloadUser = root' "$ROOTFS/etc/pacman.conf" \
-  && ok "pacman download sandbox disabled (DownloadUser = root)" || bad "DownloadUser not set to root"
+grep -qE '^DisableSandbox' "$ROOTFS/etc/pacman.conf" \
+  && ok "pacman sandbox disabled (DisableSandbox)" || bad "DisableSandbox not set in pacman.conf"
 [ -x "$SB/usr/bin/omarchy-gui" ] && ok "omarchy-gui executable on PATH" || bad "omarchy-gui not on PATH"
 [ -x "$SB/usr/bin/omarchy-cli" ] && ok "omarchy-cli executable on PATH" || bad "omarchy-cli not on PATH"
 

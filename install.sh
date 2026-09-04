@@ -184,22 +184,25 @@ nameserver 1.0.0.1
 nameserver 8.8.8.8
 RESOLV_INNER
 
-say "Disabling pacman download sandbox (Landlock/PRoot incompatible)..."
-# pacman 7 downloads packages as sandboxed user 'alpm' behind a Landlock
-# LSM filter. Android kernels under PRoot don't expose Landlock, so every
-# package download dies with "restricting filesystem access failed".
-# Downloads as root work fine inside PRoot.
+say "Disabling pacman sandbox (Landlock unsupported in PRoot)..."
+# pacman 7 downloads packages inside a Landlock LSM sandbox. Android
+# kernels under PRoot don't expose Landlock, so every download dies with
+# "restricting filesystem access failed". DisableSandbox turns the whole
+# download sandbox off (DownloadUser alone is NOT enough — the Landlock
+# filter applies even when downloading as root).
 PCONF="$R/etc/pacman.conf"
 [ -f "$PCONF" ] || { printf '[options]\n' > "$PCONF"; }
-if grep -qE '^\s*#\s*DownloadUser' "$PCONF"; then
-    sed -i -E 's|^\s*#\s*DownloadUser.*|DownloadUser = root|' "$PCONF"
-elif ! grep -qE '^\s*DownloadUser' "$PCONF"; then
-    sed -i '/^\[options\]/a DownloadUser = root' "$PCONF"
-else
+if grep -qE '^\s*#\s*DisableSandbox\b' "$PCONF"; then
+    sed -i -E 's|^\s*#\s*(DisableSandbox)\b.*|\1|' "$PCONF"
+elif ! grep -qE '^\s*DisableSandbox\b' "$PCONF"; then
+    sed -i '/^\[options\]/a DisableSandbox' "$PCONF"
+fi
+# Keep downloads as root too (no sandbox user switch at all)
+if grep -qE '^\s*DownloadUser' "$PCONF"; then
     sed -i -E 's|^\s*DownloadUser.*|DownloadUser = root|' "$PCONF"
 fi
-grep -q '^DownloadUser = root' "$PCONF" || fail "could not set DownloadUser in pacman.conf"
-say "pacman downloads will run as root (sandbox off)."
+grep -qE '^\s*DisableSandbox\b' "$PCONF" || fail "could not disable pacman sandbox"
+say "pacman sandbox disabled (downloads as root, no Landlock)."
 
 say "Initialising pacman keyring (first run can take several minutes)..."
 rm -rf "$R/etc/pacman.d/gnupg"
