@@ -1,30 +1,101 @@
 # Changelog
 
+## [2.0.0] — 2026-09-04 (native-parity rehaul)
+
+### Changed — the desktop is now the REAL Omarchy
+- **Compositor: i3 → Hyprland (patched).** Native Omarchy runs on
+  Hyprland + Aquamarine; under PRoot, stock Hyprland requires DRM/KMS
+  (which PRoot cannot expose) and its Wayland backend has unfixed
+  Android buffer-presentation bugs. We now consume the patched
+  Hyprland+Aquamarine+Weston stacks from the checksum-verified
+  [omarchy-android v0.1.1 release bundle](https://github.com/BlackFireAlex/omarchy-android/releases/tag/v0.1.1)
+  (MIT). The full prebuilt guest rootfs is part of that bundle — quickshell
+  0.3.1, foot 1.27, nautilus 50, chromium 151, omarchy Shell v4 plus the
+  pinned basecamp/omarchy repository at /usr/share/omarchy.
+- **Display chain: Termux:X11 → X11 with i3 → Termux:X11 → patched Weston
+  (nested Wayland parent) → patched Hyprland (Wayland client of Weston)
+  → real Omarchy Shell.**
+- **Shell: hand-rolled i3 config → real Omarchy Shell (quickshell QML
+  bar, menu, Spotlight-style launcher, notifications, OSD).** Themes
+  switch via the upstream `omarchy-theme-set` command, against any of
+  the bundled theme packages (`themes/tokyo-night`, `catppuccin`,
+  `nord`, `gruvbox`, …).
+- **Terminal: xterm → foot.**
+- **Installer architecture: pacman bootstrap → bundle deploy.** The new
+  flow downloads (~1.1 GB once), SHA256-verifies, extracts, deploys the
+  prebuilt rootfs into a `omarchy-android` PRoot container, vendors the
+  upstream start/stop/status/hyprctl scripts, writes
+  `runtime.conf`, and runs a smoke test.
+- **Default container name is `omarchy-android`** to keep the upstream
+  release.bundle the single source of truth (its `/proc/maps` matching
+  expects that name). Renamable via `OMARCHY_CONTAINER_NAME=<name>`.
+- **GPU auto-detect:** KGSL (Adreno) with direct DMA-BUF when
+  `/dev/kgsl-3d0` is rw; otherwise VirGL (universal but slower).
+- **Status, stop, and hyprctl commands** added (`omarchy-gui status`,
+  `omarchy-stop`, the `omarchy-android` dispatcher at
+  `~/.local/share/omarchy-android/bin/`).
+- **Storage / bandwidth:** baseline install now needs ~8 GB free storage
+  and downloads ~1.18 GB once. Doctor check enforces and explains this.
+
+### Added
+- **`install.sh doctor`** — non-destructive host-readiness inspector.
+  Checks Termux env, architecture, host packages, Adreno KGSL,
+  phantom-process state, Termux:X11 app, install state.
+- **`OMARCHY_BUNDLE=/path/to/file.tar`** — sideload a pre-downloaded
+  bundle (useful in low-bandwidth environments).
+- **`OMARCHY_GPU_MODE=kgsl|virgl|auto`** — override GPU selection at
+  install time.
+- **`OMARCHY_SCALE`, `OMARCHY_REFRESH_MHZ`, `OMARCHY_KEYBOARD_LAYOUT`,
+  `OMARCHY_SHARE`, `OMARCHY_AUDIO`** — runtime.tunables written into
+  `runtime.conf`.
+- **Phantom-process guidance** — doctor reports Developer-options
+  "Disable child process restrictions" requirement with the exact path
+  (Build number × 7 → Developer options).
+- **Manifest-level checksum verify** — bundle extracted only after
+  outer SHA256, inner `SHA256SUMS -c`, and tar member path-safety scan
+  (no `/…` or `..` member paths).
+- **Brand new `tests/run-tests.sh`** (38 assertions):
+  static checks, full sandbox install (fresh), idempotency re-run,
+  tamper detection with cache re-seed + recovery, unsafe-tar-path
+  refusal, missing-host-command abort with fix hint, doctor mode.
+  Runs the entire flow on any Linux box without a phone.
+- **`install-x11.sh` is preserved** in the repo (deprecated; contains
+  the v1 i3 implementation reachable from git history or for fallback
+  needs).
+
+### Removed
+- The deprecated Tokyo Night copy + i3 config dropped in v1 — the new
+  flow uses the upstream omarchy Shell + pinned Tokyo Night from the
+  release bundle.
+- Hand-rolled `.startwm`, manually-configured `pulseaudio` module
+  ceremony, custom rofi theme — all delegated to upstream omarchy.
+
+### Attribution
+The native-parity build would not exist without the
+[BlackFireAlex/omarchy-android](https://github.com/BlackFireAlex/omarchy-android)
+project, which ships the proven patched display stack and the prebuilt
+guest rootfs. See `README.md` § "Attribution" for full credits. Special
+thanks to hyprwm, basecamp/omarchy, and the Mesa Turnip maintainers.
+
 ## [1.1.0] — 2026-09-04
 
 ### Fixed
-- **Inner provisioning script always aborted after system upgrade** — inverted `_SOK` flag with no error capture made every install end in `[ERR] sys upgrade failed` even when pacman succeeded. All inner commands now use explicit `if !` error capture.
-- **aarch64 bootstrap impossible on proot-distro v5+** — newer versions pull `archlinux` from Docker Hub (amd64-only: "No image found for architecture 'arm64'"). The installer now installs the official Arch Linux ARM tarball from the last proot-distro release that shipped it (`v4.17.3`, asset verified live), with the distro alias as fallback. Rootfs detection also covers both on-disk layouts (`installed-rootfs/` and `containers/<name>/rootfs`).
-- **Every package download failed inside PRoot** — pacman 7's download sandbox (Landlock LSM + sandbox user) can't work on Android kernels under PRoot ("restricting filesystem access failed because Landlock is not supported"; `DownloadUser = root` alone is NOT enough — the Landlock filter applies even as root). The installer now sets `DisableSandbox` (and pins `DownloadUser = root`) in the rootfs pacman.conf before any install.
-- **`omarchy-gui: command not found` right after install** — the aliases only load in *new* shells. Real executables are now installed in `$PREFIX/bin` so the commands work in the current session immediately.
-- **Step-4 container detection false results** — detection parsed `proot-distro list`, which lists *available* (not-yet-installed) distros too, so fresh devices skipped bootstrap and existing devices could double-install. Detection now checks the rootfs directory on disk (`$PREFIX/var/lib/proot-distro/installed-rootfs/archlinux`) and is immune to proot-distro output-format changes.
-- **Gutted audio block** — empty remnants of a failed patch left the PulseAudio/PipeWire fallback dead. Rewritten: PulseAudio with client config, pipewire-pulse fallback, non-fatal if neither.
-- **Removed fragile pinned rootfs URL** (`v4.17.3` + `--name` flag) in favour of plain `proot-distro install archlinux`, which always resolves the right tarball for the device architecture.
-- **User provisioning no longer uses `su` inside PRoot** (PAM-flaky on Android). Runs via `proot-distro login --user omarchy`.
-- **Broken `termux-x11` version detection** (`2>&1 /dev/null` redirect nonsense) replaced by a `command -v` guard with `termux-x11` / `termux-x11-nightly` package fallback.
-- **Shell profiles appended on every run** — now guarded by markers; re-runs no longer duplicate `.bashrc` content.
-- Installer no longer `clear`s the terminal on start, preserving error scrollback for debugging.
+- Inner provisioning script always aborted after system upgrade (inverted
+  `_SOK` flag with no error capture).
+- aarch64 bootstrap impossible on proot-distro v5+ (Docker Hub pull).
+- Every package download failed inside PRoot (Landlock sandbox).
+- `omarchy-gui: command not found` right after install (aliases only
+  load in new shells).
+- Step-4 container detection false results (parsed `proot-distro list`).
+- Gutted audio block, fragile rootfs URL, PAM-flaky `su`.
 
 ### Added
-- **Sandbox test harness** (`tests/run-tests.sh`) — 32 assertions covering fresh install, idempotent re-run, and failure paths, runnable on any Linux box without a phone. Inner scripts honour `OMARCHY_ROOTFS` to make this possible.
-- **Resume-safe installs** — every step detects completed work and skips it; a failed root provisioning keeps its script on disk for inspection.
-- **Termux:Widget home-screen shortcut** (`~/.shortcuts/Omarchy`) created automatically when Termux:Widget is present.
-- **Post-install verification** — checks launchers, inner session files, sudoers, and whether the Termux:X11 *app* is installed, with precise remediation messages.
-- Restructured README with an exact-order prerequisites guide (Play-Store removal → F-Droid → Termux → Widget → X11 app → battery optimisation).
-
-### Removed
-- Debug debris from the hotfix sessions (`FIX-PLAN.md`, `fix_*.py`).
+- Sandbox test harness (`tests/run-tests.sh`, 32 assertions).
+- Resume-safe installs.
+- Termux:Widget home-screen shortcut.
 
 ## [1.0.0] — 2026-09-03
 
-- Initial one-shot installer: Arch ARM rootfs, keyring repair, DNS injection, i3 + Catppuccin desktop, audio bridge, VirGL/llvmpipe graphics, `omarchy-gui` / `omarchy-cli` launchers.
+- Initial one-shot installer: Arch ARM rootfs, keyring repair, DNS
+  injection, i3 + Catppuccin desktop, audio bridge, VirGL/llvmpipe
+  graphics, `omarchy-gui` / `omarchy-cli` launchers.

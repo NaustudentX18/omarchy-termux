@@ -1,196 +1,158 @@
-# Omarchy Termux
+# Omarchy Termux (native parity)
 
-> Arch Linux + i3 desktop with the Omarchy toolchain, running rootless on your Android phone via Termux + PRoot + Termux:X11.
+A one-shot installer that puts the **real Omarchy** on an Android phone:
+Hyprland compositor, the actual **Omarchy Shell** (quickshell bar / menu /
+notifications / OSD), Foot terminal, Nautilus, Chromium — all themed with
+the native Tokyo Night palette, rendered through a patched nested Wayland
+stack because the upstream Hyprland can't drive PRoot without it.
 
-[![Arch Linux ARM](https://img.shields.io/badge/Arch_Linux_ARM-aarch64%20%7C%20x86__64-1793D1?style=flat-square&logo=arch-linux&logoColor=white)](https://archlinuxarm.org/)
-[![Termux](https://img.shields.io/badge/Termux-PRoot--Distro-000000?style=flat-square&logo=termux&logoColor=white)](https://termux.dev/)
-[![Termux:X11](https://img.shields.io/badge/Display-Termux%3AX11-17B2A8?style=flat-square)](https://github.com/termux/termux-x11)
-[![Tests](https://img.shields.io/badge/tests-32%2F32%20passing-2EA043?style=flat-square)](tests/run-tests.sh)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+```
+┌──────────────────── Phone ────────────────────┐
+│  Termux host (Bionic/Android)                 │
+│  ┌───────────────┐    ┌────────────────────┐   │
+│  │  Termux:X11   │ ◄──│  Weston (patched)  │   │
+│  │  surface &    │    │  nested Wayland    │   │
+│  │  input bridge │    │  parent            │   │
+│  └───────────────┘    └────────┬───────────┘   │
+│  ┌──── PRoot Arch ARM ────────│─────────────┐  │
+│  │  guest /                   │             │  │
+│  │   Hyprland (patched) ──────┘             │  │
+│  │   ─ Aquamarine Wayland backend (no KMS)  │  │
+│  │   ─ Omarchy Shell  quickshell QML        │  │
+│  │   ─ foot / nautilus / chromium           │  │
+│  │   ─ Hyprland config + Tokyo Night theme  │  │
+│  └──────────────────────────────────────────┘  │
+└────────────────────────────────────────────────┘
+```
 
-<p align="center">
-  <img src="assets/banner.jpg" alt="Omarchy Termux" width="720">
-</p>
+The prebuilt graphics stack (patched Weston module, patched Hyprland +
+Aquamarine stages, Mesa KGSL/Turnip build) ships in the checksum-verified
+[omarchy-android v0.1.1 release bundle](https://github.com/BlackFireAlex/omarchy-android/releases/tag/v0.1.1).
+Nothing compiles on the phone.
 
-One script turns a plain Termux install into a full developer desktop: Arch Linux ARM under `proot-distro`, i3 window manager with Catppuccin theming, PulseAudio routed to Android speakers, Mesa graphics (VirGL or llvmpipe), and DHH's [Omarchy](https://github.com/omacom/omarchy) CLI toolchain.
+## What you need on the phone
 
-**The installer is resumable** — if anything fails (usually network), fix nothing and just re-run it. Every step detects what is already done and skips it.
+| Requirement   | Notes |
+|---|---|
+| **Android 8+**, ARM64 | S25 / Tab S9 / any Adreno or Mali phone with ≥8 GB free |
+| Termux from F-Droid **or** GitHub | **NOT** the Play Store build — it is years out of date |
+| **Termux:X11 nightly APK** from GitHub releases | `com.termux.x11` — stable build won't work for the AHardwareBuffer path |
+| Developer options → **"Disable child process restrictions"** | Without it the Android 12+ phantom-process killer reaps the desktop within ~30 s |
+| ≥8 GB free storage | The container takes ~4 GB; ~1.1 GB to download the bundle |
 
----
-
-## Prerequisites — install these first, in this exact order
-
-Each step exists because skipping it breaks a later one. Do them top to bottom, once.
-
-### Step 1 — Remove the Play Store Termux (skip if you never had it)
-
-The Google Play build of Termux has been abandoned since 2020 and cannot run proot-distro. Check **Settings → Apps**:
-- **Termux installed from Play Store?** Uninstall it. You lose nothing — its data is incompatible anyway.
-- **Termux installed from F-Droid or GitHub?** Keep it, skip to Step 3.
-
-### Step 2 — Install F-Droid
-
-F-Droid is the app store we'll pull Termux and Termux:Widget from.
-
-1. Open [f-droid.org](https://f-droid.org) in your phone's browser
-2. Download the F-Droid APK and install it (allow "install unknown apps" when prompted)
-3. Open F-Droid once and let it refresh its index
-
-### Step 3 — Install Termux (from F-Droid)
-
-1. In F-Droid, search for **Termux** (package `com.termux`)
-2. Install it
-3. Open Termux once, grant any permission it asks for, then close it
-
-> Alternative if you prefer GitHub: grab the Termux APK from [termux/termux-app releases](https://github.com/termux/termux-app/releases). Pick **one** source and stay with it for Termux *and* Termux:Widget.
-
-### Step 4 — Install Termux:Widget (from F-Droid, optional)
-
-Gives you a home-screen button that launches the Omarchy desktop with one tap.
-
-1. In F-Droid, search for **Termux:Widget** (package `com.termux.widget`)
-2. Install it
-
-### Step 5 — Install Termux:X11 (from GitHub — it is NOT on F-Droid)
-
-This is the display server app; the desktop renders inside it.
-
-1. Go to [termux/termux-x11 Releases](https://github.com/termux/termux-x11/releases)
-2. Download the latest **`app-arm64-v8a.apk`** (use `app-x86_64.apk` only on an x86 emulator)
-3. Install it (allow "install unknown apps" for your browser when prompted)
-
-> If you ever upgrade Termux:X11, uninstall the old one first — release and debug builds are signed differently and refuse to overwrite each other.
-
-### Step 6 — Disable battery optimization (all three apps)
-
-Android's phantom process killer will murder PRoot mid-install otherwise. For **Termux**, **Termux:X11** and **Termux:Widget**:
-
-**Settings → Apps → (app) → Battery → Unrestricted**
-
-### Step 7 — Open Termux and run the installer
-
-That's everything. Continue to the next section.
-
----
-
-## Install — one command
-
-Open Termux and paste:
+## Quick start
 
 ```bash
 curl -sL https://raw.githubusercontent.com/NaustudentX18/omarchy-termux/main/install.sh | bash
 ```
 
-If Android's clipboard mangles long pasted lines, use this instead:
+(or `wget -qO- ... | bash`).
+
+The first run auto-detects every prerequisite and walks through:
+**preflight → host packages → fetch & verify the bundle → deploy the
+rootfs & host runtime → vendor session scripts → launchers & shortcuts →
+smoke-test the guest.**
+
+When installation finishes you can drive the desktop with:
 
 ```bash
-wget -qO i.sh https://raw.githubusercontent.com/NaustudentX18/omarchy-termux/main/install.sh && bash i.sh
+omarchy-gui      # start desktop (switch to the Termux:X11 app)
+omarchy-stop     # tear it down
+omarchy-cli      # drop straight into the omarchy shell (no GUI)
+omarchy-gui status
 ```
 
-**Requirements:** Android 8+ · 64-bit · ~8 GB free storage · stable Wi-Fi (downloads ~3 GB).
+A home-screen launcher (`Termux:Widget` → `~/.shortcuts/Omarchy`) appears
+the first time `termux-widget` is run.
 
-### What the installer does
-
-| Step | Action | Skips if… |
-|---|---|---|
-| 1 | Verifies Termux + CPU architecture, takes a wake-lock | — |
-| 2 | Updates Termux packages, installs `proot-distro`, `termux-x11`, audio + graphics helpers | already installed |
-| 3 | Downloads the official Arch Linux ARM rootfs (~140 MB) | rootfs dir already on disk |
-| 4 | Inside PRoot: pacman keyring init, full system upgrade, 39 desktop/dev packages, user `omarchy` | `--needed` skips installed pkgs |
-| 5 | Inside PRoot as `omarchy`: shell profile, i3 config, session script | profile marker exists |
-| 6 | Writes launchers + home-screen shortcut, verifies the install | — |
-
-Expect **5–15 minutes** total. Watch for `==> [arch/root]` lines — that's the inner Arch Linux provisioning talking.
-
-If anything fails the installer stops **at that step**, tells you why, and keeps the failing script for debugging. Re-running resumes from where it stopped.
-
----
-
-## Launch
+## Preflight at any time
 
 ```bash
-omarchy-gui    # full desktop — then switch to the Termux:X11 app
-omarchy-cli    # terminal-only Arch session (no X11)
+./install.sh doctor
 ```
 
-Or tap the **Omarchy** button if you added the Termux:Widget (long-press desktop → Widgets → Termux:Widget).
+Prints PASS/WARN/FAIL for Termux, architecture, host packages, KGSL GPU,
+phantom-process state, Termux:X11 app presence, install state.
 
-Default login inside Arch: user `omarchy`, password `omarchy`, passwordless sudo.
+## How it picks a GPU
 
-### Desktop shortcuts (Super = the ⊞/⌘ key)
-
-| Shortcut | Action |
+| Device has… | Picks |
 |---|---|
-| Super + Enter | Terminal (xterm) |
-| Super + d | App launcher (rofi) |
-| Super + q | Close window |
-| Super + f | Fullscreen |
-| Super + arrows | Focus windows |
-| Super + Shift + r | Reload i3 |
-| Super + Shift + e | Exit desktop |
+| Read+write `/dev/kgsl-3d0` (Adreno) | `kgsl` — direct Adreno GPU acceleration via the private Mesa build in the bundle |
+| Otherwise | `virgl` — universal VirGL software path (`virgl_test_server_android`) |
 
----
+You can override either path at install time:
+
+```bash
+OMARCHY_GPU_MODE=kgsl  ./install.sh   # force KGSL
+OMARCHY_GPU_MODE=virgl ./install.sh   # force VirGL
+```
+
+## Like-for-like vs i3
+
+| Feature | omarchy-termux v2 (this build) | omarchy-termux v1 (`install-x11.sh`) |
+|---|---|---|
+| Compositor | **Hyprland (patched)** | i3 |
+| Display backend | nested Weston → Wayland | Termux:X11 → X11 |
+| Shell | **Omarchy Shell** (quickshell bar, menu, notifications, OSD) | polybar + rofi, custom bash prompts |
+| Terminal | **foot** | xterm |
+| Themes | native (`omarchy-theme-set "Tokyo Night"`) | hand-rolled colour swaps |
+| Theme switcher | full `omarchy-theme-set` + per-bar widget | none |
+| Audio | PulseAudio over TCP, AAudio sink | PulseAudio over TCP, `module-native-protocol-tcp` |
+| Launcher menus | real Omarchy menu, Spotlight search, keyboard panel | `rofi -show run` |
+| v1 retention | `install-x11.sh` in the repo (deprecated, kept for git-history access) | — |
+
+## Storage and bandwidth
+
+The release bundle is **1.18 GB** (xz-compressed rootfs + patched stages +
+weston `.so`). It is downloaded once and cached at
+`~/.cache/omarchy-termux/`. If the bundle ever fails to verify (e.g.
+truncated download), the installer **deletes the partial copy and retries**;
+`OMARCHY_BUNDLE=/path/to/local.bundle ./install.sh` accepts a sideloaded
+copy.
+
+## Tested on
+
+| Component | Version |
+|---|---|
+| omarchy-android release | v0.1.1 (pinned SHA256 in install.sh) |
+| Termux | `0.118+` from F-Droid / GitHub |
+| Termux:X11 | nightly `v1.5+` |
+| Weston (Termux pkg) | `weston 14.0.2-1` from `x11-repo` |
+| Mesa Turnip (Termux pkg) | `mesa-vulkan-icd-freedreno 26.0.6-3` |
+| Android | API 31+ (Android 12+) |
 
 ## Troubleshooting
 
-**Install failed mid-way**
-Re-run the installer — it resumes. Persistent failures are almost always network; try `termux-change-repo` in Termux and pick a nearer mirror, then re-run.
+- **`omarchy-gui` starts but the desktop dies in 30 s** — phantom processes
+  are active. Re-enable Developer options → "Disable child process
+  restrictions", re-run `omarchy-gui`.
+- **`KGSL mode needs read/write access to /dev/kgsl-3d0`** — your phone's
+  KGSL node is restricted. Install with `OMARCHY_GPU_MODE=virgl ./install.sh`
+  to fall back automatically; VirGL is slower but universal.
+- **`GET_PROC: cannot read …/proot/.…`** — old container half-installed;
+  `proot-distro remove omarchy-android && bash ./install.sh`.
+- **Weston says `libweston-14 ... not found`** — your Termux `weston` pkg
+  was updated past 14. The install depends on the `libweston-14` module
+  directory for the patched x11-backend. Either downgrade
+  (`apt install weston=14.0.2-1`) or wait for the upstream omarchy-android
+  release that supports libweston-15.
 
-**`termux-x11` companion package missing (warned at end of install)**
-```bash
-pkg install x11-repo && pkg install termux-x11
-```
-Then re-run the installer once.
+## Attribution
 
-**Termux:X11 app missing (warned at end of install)**
-Back to Prerequisites Step 5 — the app only comes from [GitHub releases](https://github.com/termux/termux-x11/releases).
+This installer is a thin wrapper that deploys, wires, and verifies the
+upstream projects that make the native Omarchy experience possible on
+Android:
 
-**Black screen after `omarchy-gui`**
-The session usually needs one retry the first time: wait 10 s, run `omarchy-gui` again. Still black → in Termux:X11 Preferences, set *Display Resolution Mode* to *Scaled* and relaunch.
+| Component | License | Source |
+|---|---|---|
+| omarchy-android release bundle | MIT + per-component | [BlackFireAlex/omarchy-android](https://github.com/BlackFireAlex/omarchy-android) (release v0.1.1) |
+| Omarchy (guest rootfs) | MIT | [basecamp/omarchy](https://github.com/basecamp/omarchy) (pinned revision) |
+| Hyprland | BSD-3-Clause | [hyprwm/Hyprland](https://github.com/hyprwm/Hyprland) |
+| Aquamarine | BSD-3-Clause | [hyprwm/aquamarine](https://github.com/hyprwm/aquamarine) |
+| Weston | MIT | [wayland/weston](https://gitlab.freedesktop.org/wayland/weston) |
+| Mesa / Turnip | MIT + SGI-B-2.0 | [mesa/mesa](https://gitlab.freedesktop.org/mesa/mesa) |
+| Termux | GPL-3 | [termux/termux-app](https://github.com/termux/termux-app) |
+| Termux:X11 | MIT | [termux/termux-x11](https://github.com/termux/termux-x11) |
 
-**No audio**
-```bash
-pulseaudio --kill; omarchy-gui
-```
-The launcher restarts PulseAudio with the Android bridge module.
-
-**`Cannot detect Arch rootfs directory`**
-```bash
-proot-distro remove archlinux
-```
-Then re-run the installer (rootfs re-downloads cleanly).
-
----
-
-## Repository structure
-
-```
-omarchy-termux/
-├── install.sh              # the one-shot installer (Termux side)
-├── tests/
-│   └── run-tests.sh        # sandbox harness: full install flow on any Linux box
-├── assets/
-│   ├── banner.jpg
-│   └── architecture.jpg
-├── CHANGELOG.md
-└── LICENSE                 # MIT
-```
-
-### Development
-
-The installer is written to be testable off-device — inner PRoot scripts take their rootfs from `OMARCHY_ROOTFS`, so a stubbed sandbox can execute the whole flow:
-
-```bash
-bash tests/run-tests.sh    # 32 assertions: fresh install, re-run, failure path
-```
-
----
-
-## Credits
-
-- **[Omarchy](https://github.com/omacom/omarchy)** — David Heinemeier Hansson's opinionated Arch desktop, which this project brings to Android
-- **[Termux](https://termux.dev/)** / **[proot-distro](https://github.com/termux/proot-distro)** — rootless Linux on Android
-- **[Termux:X11](https://github.com/termux/termux-x11)** — X server for the graphical desktop
-- **[Arch Linux ARM](https://archlinuxarm.org/)** — the rootfs underneath
-
-MIT licensed — see [LICENSE](LICENSE).
+The installer scripts in this repo are MIT-licensed — see `LICENSE`.
