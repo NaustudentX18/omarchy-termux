@@ -216,6 +216,10 @@ grep -q 'PD-INSTALL-ARGS: install --name archlinux' "$SB/log/pd.log" \
   && ok "aarch64 installs via official ALARM tarball (--name)" || bad "aarch64 did not use tarball install"
 grep -q 'archlinux-aarch64-pd-' "$SB/log/pd.log" \
   && ok "tarball URL passed to proot-distro" || bad "tarball URL missing from install args"
+grep -q '^DownloadUser = root' "$ROOTFS/etc/pacman.conf" \
+  && ok "pacman download sandbox disabled (DownloadUser = root)" || bad "DownloadUser not set to root"
+[ -x "$SB/usr/bin/omarchy-gui" ] && ok "omarchy-gui executable on PATH" || bad "omarchy-gui not on PATH"
+[ -x "$SB/usr/bin/omarchy-cli" ] && ok "omarchy-cli executable on PATH" || bad "omarchy-cli not on PATH"
 
 # ==============================================================================
 head_ "3. Idempotency (re-run on installed device)"

@@ -184,6 +184,23 @@ nameserver 1.0.0.1
 nameserver 8.8.8.8
 RESOLV_INNER
 
+say "Disabling pacman download sandbox (Landlock/PRoot incompatible)..."
+# pacman 7 downloads packages as sandboxed user 'alpm' behind a Landlock
+# LSM filter. Android kernels under PRoot don't expose Landlock, so every
+# package download dies with "restricting filesystem access failed".
+# Downloads as root work fine inside PRoot.
+PCONF="$R/etc/pacman.conf"
+[ -f "$PCONF" ] || { printf '[options]\n' > "$PCONF"; }
+if grep -qE '^\s*#\s*DownloadUser' "$PCONF"; then
+    sed -i -E 's|^\s*#\s*DownloadUser.*|DownloadUser = root|' "$PCONF"
+elif ! grep -qE '^\s*DownloadUser' "$PCONF"; then
+    sed -i '/^\[options\]/a DownloadUser = root' "$PCONF"
+else
+    sed -i -E 's|^\s*DownloadUser.*|DownloadUser = root|' "$PCONF"
+fi
+grep -q '^DownloadUser = root' "$PCONF" || fail "could not set DownloadUser in pacman.conf"
+say "pacman downloads will run as root (sandbox off)."
+
 say "Initialising pacman keyring (first run can take several minutes)..."
 rm -rf "$R/etc/pacman.d/gnupg"
 timeout 300 pacman-key --init || fail "pacman-key --init failed"
@@ -474,6 +491,13 @@ if ! grep -q "omarchy-termux aliases" "$HOME/.bashrc" 2>/dev/null; then
     } >> "$HOME/.bashrc"
     log_ok "Aliases omarchy-gui / omarchy-cli added to ~/.bashrc"
 fi
+
+# Real executables on PATH (aliases only load in *new* shells)
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s "$@"\n' "$HOME/start-omarchy.sh" \
+    > "$TERMUX_PREFIX/bin/omarchy-gui" && chmod 0755 "$TERMUX_PREFIX/bin/omarchy-gui"
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s "$@"\n' "$HOME/omarchy-cli.sh" \
+    > "$TERMUX_PREFIX/bin/omarchy-cli" && chmod 0755 "$TERMUX_PREFIX/bin/omarchy-cli"
+log_ok "Commands omarchy-gui / omarchy-cli installed on PATH (usable now)."
 
 # --- Verification -------------------------------------------------------------
 V_ERR=0
