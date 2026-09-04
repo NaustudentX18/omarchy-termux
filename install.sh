@@ -1,421 +1,348 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # ==============================================================================
-#  Omarchy on Android Termux - Bulletproof One-Shot Automated Installer
-#  Repository: https://github.com/NaustudentX18/omarchy-termux
-#  Upstream Omarchy: https://github.com/omacom/omarchy
+#  OMARCHY TERMUX — one-shot installer
+#  Repo:    https://github.com/NaustudentX18/omarchy-termux
+#  Target:  Android 8+ / aarch64 / Termux from F-Droid (NOT Play Store)
+#
+#  Design rules (each fixes a bug from earlier iterations):
+#   1. Inner PRoot scripts are fully self-contained — they never reference
+#      functions or variables defined in this outer script.
+#   2. Container detection checks the rootfs DIRECTORY on disk, never
+#      `proot-distro list` output (which also lists non-installed distros).
+#   3. Every critical command has explicit error capture — no inverted flags,
+#      no dead variables.
+#   4. All inner-script file paths go through R="${OMARCHY_ROOTFS:-/}" so the
+#      whole flow can be dry-run tested on a desktop with stubs
+#      (see tests/run-tests.sh).
+#   5. The installer is idempotent: re-running after a failure resumes.
 # ==============================================================================
 
-set -euo pipefail
+set -u
+# --- Testability: allow PREFIX/HOME override (used by tests/run-tests.sh) ----
+TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+PROOT_STATE_DIR="$TERMUX_PREFIX/var/lib/proot-distro"
+ROOTFS_DIR="$PROOT_STATE_DIR/installed-rootfs/archlinux"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ANSI color codes
-BOLD="\033[1m"
-GREEN="\033[38;2;166;227;161m"
-BLUE="\033[38;2;137;180;250m"
-PURPLE="\033[38;2;203;166;247m"
-YELLOW="\033[38;2;249;226;175m"
-RED="\033[38;2;243;139;168m"
-CYAN="\033[38;2;137;220;235m"
-RESET="\033[0m"
+# --- Pretty logging -----------------------------------------------------------
+BOLD="\033[1m"; GREEN="\033[32m"; BLUE="\033[34m"; YELLOW="\033[33m"
+RED="\033[31m"; CYAN="\033[36m"; MAGENTA="\033[35m"; RESET="\033[0m"
 
-log_info() { echo -e "${BLUE}${BOLD}[*]${RESET} $1"; }
-log_succ() { echo -e "${GREEN}${BOLD}[✓]${RESET} $1"; }
-log_warn() { echo -e "${YELLOW}${BOLD}[!]${RESET} $1"; }
-log_err()  { echo -e "${RED}${BOLD}[✗]${RESET} $1"; }
-log_step() { echo -e "\n${CYAN}${BOLD}==>${RESET} ${BOLD}$1${RESET}"; }
+log_info() { printf '%b\n' "${BLUE}${BOLD}[*]${RESET} $*"; }
+log_ok()   { printf '%b\n' "${GREEN}${BOLD}[✓]${RESET} $*"; }
+log_warn() { printf '%b\n' "${YELLOW}${BOLD}[!]${RESET} $*"; }
+log_fail() { printf '%b\n' "${RED}${BOLD}[✗]${RESET} $*"; }
+log_step() { printf '\n%b\n' "${CYAN}${BOLD}==>${RESET} ${BOLD}$*${RESET}"; }
+
+die() { log_fail "$*"; exit 1; }
 
 banner() {
-    clear 2>/dev/null || true
     cat << "BANNER_TXT"
   ___  __  __   _   ___  ___ _  ___   __
  / _ \|  \/  | /_\ | _ \/ __| || \ \ / /
-| (_) | |\/| |/ _ \|   / (__| __ |\ V / 
- \___/|_|  |_/_/ \_\_|_\\___|_||_| |_|  
+| (_) | |\/| |/ _ \|   / (__| __ |\ V /
+ \___/|_|  |_/_/ \_\_|_\\___|_||_| |_|
       Android Termux Edition
 BANNER_TXT
-    echo -e "${PURPLE}  Opinionated, Modern Linux on Android (PRoot + Termux:X11)${RESET}\n"
+    printf '%b\n' "${MAGENTA}  Opinionated, Modern Linux on Android (PRoot + Termux:X11)${RESET}"
+    printf '\n'
 }
 
 banner
 
-# ------------------------------------------------------------------------------
-# 1. Environment & Architecture Verification
-# ------------------------------------------------------------------------------
+# ==============================================================================
+# STEP 1/6 — Preflight
+# ==============================================================================
 log_step "Step 1/6: Verifying Termux host environment"
 
-if [ ! -d "/data/data/com.termux" ]; then
-    log_err "This installer must be run inside Termux on Android!"
-    echo "Please install Termux from F-Droid: https://f-droid.org/en/packages/com.termux/"
-    exit 1
+if [ -z "${TERMUX_VERSION:-}" ] && [ ! -d "/data/data/com.termux" ]; then
+    die "This installer must run inside Termux on Android.
+         Install Termux from F-Droid: https://f-droid.org/en/packages/com.termux/"
 fi
 
-ARCH=$(uname -m)
+ARCH="$(uname -m)"
 case "$ARCH" in
-    aarch64|arm64)
-        TARGET_ARCH="aarch64"
-        ;;
-    x86_64|amd64)
-        TARGET_ARCH="x86_64"
-        ;;
-    *)
-        log_err "Unsupported CPU architecture: $ARCH. Required: aarch64 or x86_64."
-        exit 1
-        ;;
+    aarch64|arm64) TARGET_ARCH="aarch64" ;;
+    x86_64|amd64)  TARGET_ARCH="x86_64" ;;
+    *) die "Unsupported CPU architecture: $ARCH (need aarch64 or x86_64)." ;;
 esac
-log_succ "Architecture: ${BOLD}${TARGET_ARCH}${RESET}"
+log_ok "Architecture: $TARGET_ARCH"
 
-# Prevent Termux from sleeping or killing the process during long install
-if command -v termux-wake-lock >/dev/null 2>&1; then
-    log_info "Acquiring Termux wake-lock to prevent background sleep..."
-    termux-wake-lock || true
-fi
+command -v termux-wake-lock >/dev/null 2>&1 && { termux-wake-lock || true; log_ok "Wake-lock acquired."; }
 
-# ------------------------------------------------------------------------------
-# 2. Storage Permissions
-# ------------------------------------------------------------------------------
-log_step "Step 2/6: Checking Android storage permissions"
-
-if [ ! -d "$HOME/storage" ]; then
-    log_info "Requesting Android storage permission (accept prompt if it appears)..."
-    termux-setup-storage || true
+# Storage permission is OPTIONAL — only needed to see /sdcard inside PRoot.
+if [ ! -d "$HOME/storage/shared" ]; then
+    log_info "Requesting storage permission (optional — tap Allow if prompted)..."
+    command -v termux-setup-storage >/dev/null 2>&1 && termux-setup-storage || true
     sleep 1
+    [ -d "$HOME/storage/shared" ] && log_ok "Storage granted (/sdcard visible in PRoot)." \
+                                       || log_warn "Storage not granted — install continues without /sdcard."
 else
-    log_succ "Storage permissions already configured."
+    log_ok "Storage permissions already configured."
 fi
 
-# ------------------------------------------------------------------------------
-# 3. Host Dependencies & Termux Repos
-# ------------------------------------------------------------------------------
-log_step "Step 3/6: Updating Termux repositories & installing host tools"
+# ==============================================================================
+# STEP 2/6 — Termux host packages
+# ==============================================================================
+log_step "Step 2/6: Updating Termux repositories & installing host tools"
 
-export DEBIAN_FRONTEND=noninteractive
+APT_OPTS=(-o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold")
 
-# Update core repos non-interactively without getting stuck on conffile prompts
-log_info "Updating Termux package index..."
-pkg update -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
-    log_warn "Standard pkg update failed. Attempting with apt directly..."
-    apt-get update -y || true
-}
+log_info "Updating package index (and applying pending upgrades)..."
+if ! pkg update -y "${APT_OPTS[@]}"; then
+    log_warn "pkg update failed — trying apt directly..."
+    apt-get update -y || log_warn "Index update failed. If installs below fail, run: termux-change-repo"
+fi
+pkg upgrade -y "${APT_OPTS[@]}" || log_warn "pkg upgrade had issues — continuing."
 
-# Install / enable x11-repo
-log_info "Enabling Termux X11 repository..."
-pkg install -y x11-repo || true
+log_info "Enabling the Termux X11 repository..."
+pkg install -y x11-repo "${APT_OPTS[@]}" || log_warn "x11-repo enable failed — X11 package may be missing."
 
-HOST_PACKAGES=(
-    proot
-    proot-distro
-    git
-    curl
-    wget
-    tar
-    pulseaudio
-    virglrenderer-android
-    termux-x11-nightly
-    jq
-)
-
-log_info "Installing required Termux packages..."
-for pkg_name in "${HOST_PACKAGES[@]}"; do
-    if ! dpkg -s "$pkg_name" >/dev/null 2>&1; then
-        pkg install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" "$pkg_name" || {
-            log_warn "Failed to install '$pkg_name' automatically. Continuing..."
-        }
-    fi
+# termux-x11 first (x11-repo), nightly as fallback (nightly repo).
+for p in termux-x11 termux-x11-nightly; do
+    command -v termux-x11 >/dev/null 2>&1 && break
+    pkg install -y "$p" "${APT_OPTS[@]}" || true
 done
-log_succ "Termux host packages verified."
+command -v termux-x11 >/dev/null 2>&1 && log_ok "termux-x11 companion package present." \
+                                              || log_warn "termux-x11 package missing — GUI mode needs it (see README §Troubleshooting)."
 
-# ------------------------------------------------------------------------------
-# 4. Bootstrap Arch Linux via proot-distro
-# ------------------------------------------------------------------------------
-log_step "Step 4/6: Bootstrapping Arch Linux (${TARGET_ARCH})"
+HOST_PACKAGES=(proot-distro git curl wget tar pulseaudio virglrenderer-android jq bash)
+log_info "Installing host packages: ${HOST_PACKAGES[*]}"
+for p in "${HOST_PACKAGES[@]}"; do
+    command -v "$p" >/dev/null 2>&1 && continue
+    pkg install -y "$p" "${APT_OPTS[@]}" || log_warn "Could not install '$p' — continuing."
+done
+log_ok "Termux host packages verified."
 
-DISTRO_NAME="archlinux"
-if proot-distro list | grep -q "$DISTRO_NAME (installed)" || proot-distro list | grep -q "$DISTRO_NAME"; then
-    log_succ "Arch Linux rootfs is already installed in proot-distro."
+# ==============================================================================
+# STEP 3/6 — Bootstrap Arch Linux (idempotent: disk check, never list parsing)
+# ==============================================================================
+log_step "Step 3/6: Bootstrapping Arch Linux (${TARGET_ARCH})"
+
+if [ -d "$ROOTFS_DIR/etc" ]; then
+    log_ok "Existing Arch Linux rootfs found — skipping download."
 else
-    log_info "Downloading and deploying Arch Linux rootfs via proot-distro..."
-    # Modern proot-distro uses Docker/OCI registries by default. Docker Hub 'archlinux'
-    # is amd64-only, so on aarch64 we provide the official Termux release rootfs tarball directly.
-    if [[ "$TARGET_ARCH" == "aarch64" ]]; then
-        ARCH_ROOTFS_URL="https://github.com/termux/proot-distro/releases/download/v4.17.3/archlinux-aarch64-pd-v4.17.3.tar.xz"
-        proot-distro install --name "$DISTRO_NAME" "$ARCH_ROOTFS_URL" || \
-        proot-distro install "$DISTRO_NAME"
-    else
-        proot-distro install "$DISTRO_NAME"
+    log_info "Downloading & deploying Arch Linux rootfs (~140 MB)..."
+    if ! proot-distro install archlinux; then
+        # Race with a half-finished previous attempt: reset and retry once.
+        if [ -d "$ROOTFS_DIR" ]; then
+            log_warn "Rootfs appeared during install — continuing."
+        else
+            proot-distro remove archlinux >/dev/null 2>&1 || true
+            proot-distro install archlinux || die "Rootfs bootstrap failed. Check network, then re-run."
+        fi
     fi
-    log_succ "Arch Linux base rootfs deployed."
+    [ -d "$ROOTFS_DIR/etc" ] || die "Rootfs directory missing after install: $ROOTFS_DIR"
+    log_ok "Arch Linux base rootfs deployed."
 fi
+PROOT_ROOT="$ROOTFS_DIR"
 
-# Locate PROOT_ROOT dynamically (supports both legacy installed-rootfs and modern containers/ layout)
-if [ -d "/data/data/com.termux/files/usr/var/lib/proot-distro/containers/$DISTRO_NAME/rootfs" ]; then
-    PROOT_ROOT="/data/data/com.termux/files/usr/var/lib/proot-distro/containers/$DISTRO_NAME/rootfs"
-elif [ -d "/data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/$DISTRO_NAME" ]; then
-    PROOT_ROOT="/data/data/com.termux/files/usr/var/lib/proot-distro/installed-rootfs/$DISTRO_NAME"
-else
-    # Fallback to searching for the rootfs
-    PROOT_ROOT=$(find /data/data/com.termux/files/usr/var/lib/proot-distro -type d -name "$DISTRO_NAME" 2>/dev/null | head -n 1)
-    if [ -d "$PROOT_ROOT/rootfs" ]; then
-        PROOT_ROOT="$PROOT_ROOT/rootfs"
-    fi
-fi
-
-if [ -z "$PROOT_ROOT" ] || [ ! -d "$PROOT_ROOT" ]; then
-	log_err "Cannot detect Arch Linux rootfs directory. Run proot-distro install archlinux first."
-	exit 1
-fi
-
-# Ensure robust DNS before entering PRoot
-if [ -n "$PROOT_ROOT" ] && [ -d "$PROOT_ROOT/etc" ]; then
-    log_info "Configuring PRoot DNS resolvers (Cloudflare + Google fallback)..."
-    rm -f "$PROOT_ROOT/etc/resolv.conf" 2>/dev/null || true
-    cat << 'DNS_EOF' > "$PROOT_ROOT/etc/resolv.conf"
+log_info "Injecting DNS resolvers (Cloudflare + Google)..."
+cat > "$PROOT_ROOT/etc/resolv.conf" << 'RESOLV_HOST'
 nameserver 1.1.1.1
 nameserver 1.0.0.1
 nameserver 8.8.8.8
-DNS_EOF
-fi
+RESOLV_HOST
+log_ok "DNS configured."
 
-# ------------------------------------------------------------------------------
-# 5. Inner Arch Linux Provisioning
-# ------------------------------------------------------------------------------
-log_step "Step 5/6: Provisioning Omarchy environment inside Arch Linux PRoot"
+# ==============================================================================
+# STEP 4/6 — Root-level provisioning INSIDE the PRoot
+# ==============================================================================
+log_step "Step 4/6: Provisioning Arch Linux (root phase: keyring, packages, user)"
 
-ARCH_USER="omarchy"
-
-cat << 'INSIDE_EOF' > "$PROOT_ROOT/root/setup_omarchy.sh"
+# This script is written from the Termux side straight into the rootfs and
+# executed via `proot-distro login`. It is fully self-contained.
+cat > "$PROOT_ROOT/root/provision-root.sh" << 'PROVISION_ROOT'
 #!/bin/bash
-set -eo pipefail
+# provision-root.sh — runs inside Arch Linux PRoot as (fake) root.
+# Self-contained: no references to anything outside this file.
+set -u
+R="${OMARCHY_ROOTFS:-/}"
+say() { echo "==> [arch/root] $*"; }
+fail() { echo "[arch/root] FATAL: $*" >&2; exit 1; }
 
-echo "==> [Arch PRoot] Verifying network and DNS resolution..."
-cat << 'DNS' > /etc/resolv.conf
+say "Writing DNS resolver..."
+cat > "$R/etc/resolv.conf" << 'RESOLV_INNER'
 nameserver 1.1.1.1
+nameserver 1.0.0.1
 nameserver 8.8.8.8
-DNS
+RESOLV_INNER
 
-echo "==> [Arch PRoot] Seeding entropy for pacman-key init..."
-# C1 FIX: seed RNG so gpg-agent doesn't hang on /dev/random (Android PRoot has no hardware RNG)
-_RNGD=0
-if command -v rngd >/dev/null 2>&1; then
-    rngd -r /dev/urandom &
-    _RNGD_PID=$!
-    sleep 5 && kill $_RNGD_PID 2>/dev/null; wait $_RNGD_PID 2>/dev/null || true
-    _RNGD=1
-fi
-[ "$_RNGD" = "0" ] && echo "[C1] NO RNGD — using kernel CSPRNG (key init may hang)" >&2
-rm -rf /etc/pacman.d/gnupg 2>/dev/null || true
+say "Initialising pacman keyring (first run can take several minutes)..."
+rm -rf "$R/etc/pacman.d/gnupg"
+timeout 300 pacman-key --init || fail "pacman-key --init failed"
 
-START_EPOCH=$(date +%s)
-_pacm_keyinit() { timeout 180 pacman-key --init; }
-RESULT=$(_pacm_keyinit 2>&1); RC=$?; if [ "$RC" != "0" ]; then echo "[ERR] pacman-key init failed (took $(( $(date +%s) - START_EPOCH ))s)"; exit 1; fi
-
-# C2 FIX: fatal if keyring populate fails — no cascading || true anymore
-_KEY_FAIL=0
 if [ "$(uname -m)" = "aarch64" ]; then
-    pacman-key --populate archlinuxarm 2>/dev/null || _KEY_FAIL=1
-    if [ "$_KEY_FAIL" = "1" ]; then echo "[WARN] arm populate failed, trying archlinux..."; pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1; fi
+    pacman-key --populate archlinuxarm 2>/dev/null \
+        || pacman-key --populate archlinux \
+        || fail "pacman-key populate failed"
 else
-    pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1
+    pacman-key --populate archlinux || fail "pacman-key populate failed"
 fi
-if [ "$_KEY_FAIL" = "1" ]; then echo "[ERR] Keyring populate failed"; exit 1; fi
+say "Keyring populated."
 
-# fatal on keyring sys upgrade too (C2)
-_KROK=1
-pacman -Sy --noconfirm archlinux-keyring 2>&1 || _KROK=0
-if [ "$_KROK" = "0" ]; then echo "[ERR] archlinux-keyring failed"; exit 1; fi
-if [ "$(uname -m)" = "aarch64" ]; then
-    pacman -Sy --noconfirm archlinuxarm-keyring 2>/dev/null || true
+say "Refreshing keyring packages..."
+pacman -Sy --noconfirm --needed archlinuxarm-keyring archlinux-keyring 2>/dev/null \
+    || pacman -Sy --noconfirm --needed archlinux-keyring 2>/dev/null \
+    || true
+
+say "Upgrading base system (biggest step — 5-15 min)..."
+if ! pacman -Syyu --noconfirm; then
+    say "Upgrade failed once; refreshing keyring and retrying..."
+    pacman-key --populate archlinuxarm 2>/dev/null || pacman-key --populate 2>/dev/null || true
+    pacman -Syyu --noconfirm || fail "system upgrade failed (network? re-run the installer to resume)"
 fi
+say "System upgraded."
 
-echo "==> [Arch PRoot] Upgrading system..."
-# C2: fatal on sys upgrade — do NOT silently skip 40+ packages
-_SOK=1
-_SOK=0
-pacman -Syyu --noconfirm
-if [ "$_SOK" = "0" ]; then echo "[ERR] sys upgrade failed"; exit 1; fi
-if [ "$_SOK" != "1" ]; then echo "[ERR] System upgrade failed"; exit 1; fi
-
-# Core tools & environment packages
 PACKAGES=(
-    base-devel
-    sudo
-    git
-    curl
-    wget
-    nano
-    neovim
-    bash-completion
-    bat
-    eza
-    fastfetch
-    fd
-    ripgrep
-    fzf
-    btop
-    htop
-    jq
-    tmux
-    fontconfig
-    dbus
-    mesa
-    mesa-utils
-    xdg-user-dirs
-    xdg-utils
-    feh
-    rofi
-    xdotool
-    xterm
-    i3-wm
-    i3status
-    i3lock
-    dunst
-    picom
-    xorg-xhost
-    xorg-xset
-    xorg-xrdb
-    xorg-xrandr
+    base-devel sudo git curl wget nano neovim bash-completion
+    bat eza fastfetch fd ripgrep fzf btop htop jq tmux
+    fontconfig dbus mesa mesa-utils
+    xdg-user-dirs xdg-utils feh rofi xdotool xterm
+    i3-wm i3status i3lock dunst picom
+    xorg-xhost xorg-xset xorg-xrdb xorg-xrandr
 )
+say "Installing core desktop & developer packages..."
+if ! pacman -S --noconfirm --needed "${PACKAGES[@]}"; then
+    say "Bulk install failed — falling back to per-package (one bad name won't abort)..."
+    for p in "${PACKAGES[@]}"; do
+        pacman -S --noconfirm --needed "$p" || echo "[arch/root] notice: '$p' skipped"
+    done
+fi
+say "Core packages done."
 
-echo "==> [Arch PRoot] Installing core desktop and developer packages..."
-for pkg in "${PACKAGES[@]}"; do
-    pacman -S --noconfirm --needed "$pkg" || echo "[!] Notice: Package $pkg skipped or not found."
-done
-
-# Audio setup: pulseaudio or pipewire-pulse fallback
-echo "==> [Arch PRoot] Installing audio routing..."
-_PA_OK=0
-pacman -S --noconfirm --needed pulseaudio && _PA_OK=1 || true
-if [ "$_PA_OK" != "1" ]; then
-    echo "[AUDIO] PulseAudio not found, trying pipewire-pulse..." >&2
-
-
-
-
-
-
-
-mkdir -p /etc/pulse
-cat << 'PULSE_CLIENT' > /etc/pulse/client.conf
+say "Installing audio routing..."
+if pacman -S --noconfirm --needed pulseaudio; then
+    mkdir -p "$R/etc/pulse"
+    cat > "$R/etc/pulse/client.conf" << 'PA_CLIENT'
 default-server = 127.0.0.1
 autospawn = no
-PULSE_CLIENT
+PA_CLIENT
+    say "PulseAudio client configured (server on Android host)."
+elif pacman -S --noconfirm --needed pipewire-pulse; then
+    say "PulseAudio unavailable — pipewire-pulse installed instead."
+else
+    echo "[arch/root] notice: no audio stack installed (non-fatal)"
+fi
 
-# Fonts installation with robust fallbacks
-echo "==> [Arch PRoot] Installing fonts..."
-# P1-4: repo-only fonts (removed AUR-only)
-pkgs="ttf-jetbrains-mono noto-fonts noto-fonts-emoji"
-for _p in $pkgs; do pacman -S --noconfirm --needed "$_p" 2>/dev/null || true; done
-pacman -S --noconfirm --needed ttf-cascadia-code 2>/dev/null || echo "[WARN] ttf-cascadia-code not found (optional font)"
-fc-cache -f 2>/dev/null && echo "[fonts] Font cache rebuilt" || echo "[WARN] fc-cache failed — fonts may not render correctly"
+say "Installing fonts..."
+for f in ttf-jetbrains-mono-nerd ttf-jetbrains-mono noto-fonts noto-fonts-emoji ttf-cascadia-code; do
+    pacman -S --noconfirm --needed "$f" 2>/dev/null || echo "[arch/root] notice: font '$f' skipped"
+done
+fc-cache -f >/dev/null 2>&1 && say "Font cache rebuilt." || echo "[arch/root] notice: fc-cache failed"
 
-# Create user omarchy if not exists
+say "Creating user 'omarchy'..."
 USERNAME="omarchy"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
-    echo "==> [Arch PRoot] Creating user: $USERNAME..."
-    _UA_OK=0
-    for _uar in 1 2 3 4 5 6; do
-        if [ "$_UA_OK" = "1" ]; then break;
-    fi
-        if useradd -m -s /bin/bash -G wheel "$USERNAME" 2>/dev/null; then _UA_OK=1; fi
+    _ok=0
+    for _ in 1 2 3 4 5 6; do
+        useradd -m -s /bin/bash -G wheel "$USERNAME" 2>/dev/null && { _ok=1; break; }
         sleep 3
     done
-    echo "$USERNAME:omarchy" | chpasswd
-    echo "root:root" | chpasswd
+    [ "$_ok" = "1" ] || fail "useradd could not create '$USERNAME'"
+fi
+echo "$USERNAME:omarchy" | chpasswd
+echo "root:root" | chpasswd
+mkdir -p "$R/etc/sudoers.d"
+printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' > "$R/etc/sudoers.d/10-wheel-nopasswd"
+chmod 0440 "$R/etc/sudoers.d/10-wheel-nopasswd"
+say "User ready (omarchy/omarchy, passwordless sudo via wheel)."
+
+say "Fetching Omarchy components..."
+rm -rf "$R/opt/omarchy"
+if git clone --depth 1 https://github.com/omacom/omarchy.git "$R/opt/omarchy" 2>/dev/null; then
+    say "Upstream omacom/omarchy cloned to /opt/omarchy."
+else
+    echo "[arch/root] notice: upstream clone failed — creating minimal fallback"
+    mkdir -p "$R/opt/omarchy/bin" "$R/opt/omarchy/config"
+fi
+[ -f "$R/opt/omarchy/bin/omarchy" ] && ln -sf /opt/omarchy/bin/omarchy "$R/usr/local/bin/omarchy"
+
+say "Root phase complete."
+PROVISION_ROOT
+
+log_info "Executing root provisioning inside PRoot (long — watch for [arch/root] lines)..."
+if ! proot-distro login archlinux -- env OMARCHY_ROOTFS=/ bash /root/provision-root.sh; then
+    die "Root provisioning failed. The script was kept at:
+         $PROOT_ROOT/root/provision-root.sh
+         Fix the issue (usually network) and simply re-run the installer."
+fi
+rm -f "$PROOT_ROOT/root/provision-root.sh"
+log_ok "Root phase complete."
+
+# ==============================================================================
+# STEP 5/6 — User-level provisioning INSIDE the PRoot (as user omarchy)
+# ==============================================================================
+log_step "Step 5/6: Provisioning desktop for user 'omarchy'"
+
+mkdir -p "$PROOT_ROOT/home/omarchy"
+cat > "$PROOT_ROOT/home/omarchy/provision-user.sh" << 'PROVISION_USER'
+#!/bin/bash
+# provision-user.sh — runs inside Arch Linux PRoot as user 'omarchy'.
+# Self-contained: no references to anything outside this file.
+set -u
+R="${OMARCHY_ROOTFS:-/}"
+say() { echo "==> [arch/user] $*"; }
+
+mkdir -p "$HOME/.config" "$HOME/.local/bin" "$HOME/.local/share" \
+         "$HOME/Desktop" "$HOME/Downloads" "$HOME/Documents"
+
+if [ -d "$R/opt/omarchy/config" ]; then
+    cp -r "$R/opt/omarchy/config/." "$HOME/.config/" 2>/dev/null || true
+    say "Omarchy upstream configs synced to ~/.config"
 fi
 
-# Passwordless sudo for wheel group
-echo "%wheel ALL=(ALL:ALL) NOPASSWD: ALL" > /etc/sudoers.d/10-wheel-nopasswd
-chmod 0440 /etc/sudoers.d/10-wheel-nopasswd
+# --- Shell profile (append once, guarded by marker) ---------------------------
+if ! grep -q "omarchy-termux profile v2" "$HOME/.bashrc" 2>/dev/null; then
+    cat >> "$HOME/.bashrc" << 'USER_BASHRC'
 
-# Clone upstream Omarchy repository or fallback
-echo "==> [Arch PRoot] Setting up Omarchy components..."
-rm -rf /opt/omarchy
-git clone --depth 1 https://github.com/omacom/omarchy.git /opt/omarchy || {
-    echo "[!] Official omacom/omarchy clone failed; creating fallback structure..."
-    mkdir -p /opt/omarchy/bin /opt/omarchy/config
-}
-chown -R "$USERNAME:$USERNAME" /opt/omarchy 2>/dev/null || true
-
-# Link binary if present
-if [ -f /opt/omarchy/bin/omarchy ]; then
-    ln -sf /opt/omarchy/bin/omarchy /usr/local/bin/omarchy
-    chmod +x /opt/omarchy/bin/* 2>/dev/null || true
-fi
-
-# Deploy Omarchy themes, shell configs and desktop environment
-su - "$USERNAME" -c '
-set -eo pipefail
-mkdir -p "$HOME/.config" "$HOME/.local/bin" "$HOME/.local/share" "$HOME/Desktop" "$HOME/Downloads" "$HOME/Documents"
-
-# Sync omarchy defaults and configurations
-if [ -d "/opt/omarchy/config" ]; then
-    cp -r /opt/omarchy/config/* "$HOME/.config/" 2>/dev/null || true
-fi
-
-# Configure Omarchy environment in ~/.bashrc
-cat << "USER_BASHRC" >> "$HOME/.bashrc"
-# Omarchy Shell Profile & Aliases
+# --- omarchy-termux profile v2 ------------------------------------------------
 export PATH="$HOME/.local/bin:/opt/omarchy/bin:$PATH"
 export PULSE_SERVER=127.0.0.1
 export DISPLAY=:0
 export TERM=xterm-256color
-
-# VirGL Hardware Acceleration
-# P1-5: Auto-detect VirGL (only on Qualcomm Adreno); fallback to llvmpipe
-# Detect VirGL hardware available
-if command -v virgl_test_server_android >/dev/null 2>&1 &&    virgl_test_server_android --test >/dev/null 2>&1; then
-    export GALLIUM_DRIVER=virpipe
-else
-    export GALLIUM_DRIVER=llvmpipe
-fi
+export GALLIUM_DRIVER=llvmpipe
 export MESA_GL_VERSION_OVERRIDE=4.0
-
-alias ll="eza -la --icons" 2>/dev/null || alias ll="ls -la"
-alias ls="eza --icons" 2>/dev/null || alias ls="ls"
+alias ll="eza -la --icons"
+alias ls="eza --icons"
 alias om="omarchy"
-alias ff="fastfetch" 2>/dev/null || alias ff="true"
-
-if [ -f /opt/omarchy/logo.txt ]; then
-    cat /opt/omarchy/logo.txt 2>/dev/null || true
-fi
+alias ff="fastfetch"
+[ -f /opt/omarchy/logo.txt ] && cat /opt/omarchy/logo.txt 2>/dev/null || true
+# --- end omarchy-termux profile -----------------------------------------------
 USER_BASHRC
+    say "Shell profile installed."
+else
+    say "Shell profile already present."
+fi
 
-# Create default startwm script for X11 session
-cat << "STARTWM" > "$HOME/.startwm"
+# --- GUI session script --------------------------------------------------------
+cat > "$HOME/.startwm" << 'STARTWM'
 #!/bin/bash
 export DISPLAY=:0
 export PULSE_SERVER=127.0.0.1
 export XDG_CURRENT_DESKTOP=i3
-# P1-5: Auto-detect VirGL (only on Qualcomm Adreno); fallback to llvmpipe
-if command -v virgl_test_server_android >/dev/null 2>&1 &&    virgl_test_server_android --test >/dev/null 2>&1; then
-    export GALLIUM_DRIVER=virpipe
-else
-    export GALLIUM_DRIVER=llvmpipe
-fi
+export GALLIUM_DRIVER=llvmpipe
 export MESA_GL_VERSION_OVERRIDE=4.0
 
-# Start D-Bus session
 if command -v dbus-launch >/dev/null 2>&1; then
-    eval $(dbus-launch --sh-syntax)
+    eval "$(dbus-launch --sh-syntax)"
 fi
-[ -z "$DBUS_SESSION_BUS_ADDRESS" ] && export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-/tmp/dbus}"
 
-# Start Dunst notifications
-command -v dunst >/dev/null 2>&1 && dunst &
+command -v dunst >/dev/null 2>&1 && dunst >/dev/null 2>&1 &
+command -v picom >/dev/null 2>&1 && picom --backend xrender -b >/dev/null 2>&1 &
 
-# Start compositor with xrender for PRoot compatibility
-command -v picom >/dev/null 2>&1 && picom --backend xrender -b 2>/dev/null || true
-
-# Launch i3 window manager
 exec i3
 STARTWM
 chmod +x "$HOME/.startwm"
+say "Session script ~/.startwm installed."
 
-# Minimal modern i3 configuration tailored for mobile/touch screen
+# --- i3 window manager config --------------------------------------------------
 mkdir -p "$HOME/.config/i3"
-cat << "I3CONF" > "$HOME/.config/i3/config"
+cat > "$HOME/.config/i3/config" << 'I3CONF'
+# omarchy-termux i3 config — mobile-friendly Catppuccin Mocha
 set $mod Mod4
-font pango:JetBrainsMono Nerd Font 10, monospace 10
+font pango:JetBrainsMono Nerd Font, monospace 10
 
-# Bar configuration
 bar {
     status_command i3status
     position top
@@ -429,108 +356,126 @@ bar {
     }
 }
 
-# Keybindings
 bindsym $mod+Return exec xterm
 bindsym $mod+d exec rofi -show run
 bindsym $mod+q kill
 bindsym $mod+Shift+e exit
 bindsym $mod+Shift+r restart
-
-# Floating & full screen
 bindsym $mod+f fullscreen toggle
 bindsym $mod+Shift+space floating toggle
+bindsym $mod+Left focus left
+bindsym $mod+Right focus right
+bindsym $mod+Up focus up
+bindsym $mod+Down focus down
 
-# Window styling
 default_border pixel 2
-client.focused #89b4fa #89b4fa #1e1e2e #89b4fa #89b4fa
+client.focused   #89b4fa #89b4fa #1e1e2e #89b4fa #89b4fa
 client.unfocused #313244 #313244 #a6adc8 #313244 #313244
 I3CONF
-'
+say "i3 configuration installed."
+say "User phase complete."
+PROVISION_USER
 
-echo "==> [Arch PRoot] Omarchy internal bootstrap complete!"
-INSIDE_EOF
+log_info "Executing user provisioning inside PRoot..."
+if ! proot-distro login archlinux --user omarchy -- env OMARCHY_ROOTFS=/ HOME=/home/omarchy \
+        bash /home/omarchy/provision-user.sh; then
+    die "User provisioning failed. Re-run the installer to resume."
+fi
+rm -f "$PROOT_ROOT/home/omarchy/provision-user.sh"
+log_ok "User phase complete."
 
-chmod +x "$PROOT_ROOT/root/setup_omarchy.sh"
+# ==============================================================================
+# STEP 6/6 — Host launchers, widget shortcut, verification
+# ==============================================================================
+log_step "Step 6/6: Creating launchers & verifying installation"
 
-log_info "Executing internal Omarchy bootstrap inside PRoot (this may take a few minutes)..."
-proot-distro login "$DISTRO_NAME" -- /root/setup_omarchy.sh
-rm -f "$PROOT_ROOT/root/setup_omarchy.sh"
-
-# ------------------------------------------------------------------------------
-# 6. Host Launchers & Termux Shortcuts
-# ------------------------------------------------------------------------------
-log_step "Step 6/6: Creating bulletproof host launchers"
-
-cat << 'LAUNCHER_EOF' > "$HOME/start-omarchy.sh"
+cat > "$HOME/start-omarchy.sh" << 'GUI_LAUNCHER'
 #!/data/data/com.termux/files/usr/bin/bash
-# Omarchy GUI Session Launcher for Android
+# Omarchy GUI session launcher (Termux side)
+echo "[*] Cleaning up previous X11 / audio / VirGL processes..."
+killall -9 termux-x11 pulseaudio virgl_test_server_android 2>/dev/null
+sleep 1
 
-echo "[*] Cleaning up any previous X11, Audio, or VirGL processes..."
-killall -9 termux-x11 Xwayland pulseaudio virgl_test_server_android 2>/dev/null || true
-sleep 0.5
-
-echo "[*] Starting PulseAudio sound server..."
+echo "[*] Starting PulseAudio (Android audio bridge)..."
 pulseaudio --start \
     --load="module-native-protocol-tcp auth-ip-acl=127.0.0.1 auth-anonymous=1" \
-    --exit-idle-time=-1 2>/dev/null || true
+    --exit-idle-time=-1 2>/dev/null || echo "[!] PulseAudio failed to start (no audio)"
 
-# VirGL 3D Acceleration Server (Fallback gracefully if not supported/installed)
+# VirGL 3D acceleration (optional, Adreno GPUs)
 if command -v virgl_test_server_android >/dev/null 2>&1; then
-    echo "[*] Starting VirGL 3D acceleration..."
+    echo "[*] Starting VirGL 3D server..."
     virgl_test_server_android >/dev/null 2>&1 &
 fi
 
-echo "[*] Launching Termux:X11 Companion..."
-am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity 2>/dev/null || true
+echo "[*] Launching Termux:X11 app..."
+am start -n com.termux.x11/com.termux.x11.MainActivity 2>/dev/null \
+    || echo "[!] Termux:X11 app not installed — GUI cannot start. See README §Prerequisites."
 
-echo "[*] Initializing X11 display :0..."
-export DISPLAY=:0
-# P0-4: detect T:X11 version — prefer -w (wayland-compat), fallback to legacy
-if termux-x11 2>&1 /dev/null | grep -q -- "-"; then
-    TXX_FLAGS="-ac -w"
-else
-    TXX_FLAGS="-ac -legacy-drawing"
+echo "[*] Starting X server on display :0..."
+X11_PID=""
+if command -v termux-x11 >/dev/null 2>&1; then
+    termux-x11 :0 -ac >/dev/null 2>&1 &
+    X11_PID=$!
 fi
-termux-x11 :0 $TXX_FLAGS 2>/dev/null &
-X11_PID=$!
-sleep 1.2
+sleep 1.5
 
-echo "[*] Entering Omarchy Linux..."
-proot-distro login archlinux --user omarchy --shared-tmp -- env DISPLAY=:0 PULSE_SERVER=127.0.0.1 DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" /home/omarchy/.startwm
+echo "[*] Entering Omarchy desktop (switch to the Termux:X11 app now)..."
+proot-distro login archlinux --user omarchy --shared-tmp -- \
+    env DISPLAY=:0 PULSE_SERVER=127.0.0.1 GALLIUM_DRIVER=llvmpipe \
+    /home/omarchy/.startwm
 
-# Cleanup when GUI closes
-echo "[*] Session ended. Cleaning up background services..."
-kill -9 $X11_PID 2>/dev/null || true
-killall -9 virgl_test_server_android pulseaudio 2>/dev/null || true
-LAUNCHER_EOF
+echo "[*] Session ended. Cleaning up..."
+[ -n "$X11_PID" ] && kill "$X11_PID" 2>/dev/null
+killall -9 virgl_test_server_android pulseaudio 2>/dev/null
+echo "[*] Done."
+GUI_LAUNCHER
+chmod 0755 "$HOME/start-omarchy.sh"
 
-chmod +x "$HOME/start-omarchy.sh"
-
-# CLI-only quick launcher
-cat << 'CLI_LAUNCHER' > "$HOME/omarchy-cli.sh"
+cat > "$HOME/omarchy-cli.sh" << 'CLI_LAUNCHER'
 #!/data/data/com.termux/files/usr/bin/bash
+# Omarchy CLI session launcher (no X11)
 export PULSE_SERVER=127.0.0.1
 export TERM=xterm-256color
-proot-distro login archlinux --user omarchy --shared-tmp
+proot-distro login archlinux --user omarchy
 CLI_LAUNCHER
-chmod +x "$HOME/omarchy-cli.sh"
+chmod 0755 "$HOME/omarchy-cli.sh"
 
-# Add aliases to Termux profile
-if ! grep -q "start-omarchy.sh" "$HOME/.bashrc" 2>/dev/null; then
-    echo "alias omarchy-gui='$HOME/start-omarchy.sh'" >> "$HOME/.bashrc"
-    echo "alias omarchy-cli='$HOME/omarchy-cli.sh'" >> "$HOME/.bashrc"
+# Termux:Widget home-screen shortcut (optional)
+if [ -d "$HOME/.shortcuts" ] || command -v termux-widget >/dev/null 2>&1; then
+    mkdir -p "$HOME/.shortcuts"
+    printf '#!/data/data/com.termux/files/usr/bin/bash\n%s\n' "$HOME/start-omarchy.sh" \
+        > "$HOME/.shortcuts/Omarchy"
+    chmod 0755 "$HOME/.shortcuts/Omarchy"
+    log_ok "Termux:Widget shortcut created (~/.shortcuts/Omarchy)."
 fi
 
-banner
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════════════════${RESET}"
-echo -e "${GREEN}${BOLD}       INSTALLATION COMPLETE! OMARCHY IS READY TO LAUNCH          ${RESET}"
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════════════════${RESET}\n"
-echo -e "  To launch the ${BOLD}Graphical Desktop (Termux:X11)${RESET}:"
-echo -e "    ${PURPLE}omarchy-gui${RESET}   (or: ${PURPLE}./start-omarchy.sh${RESET})\n"
-echo -e "  To launch the ${BOLD}Terminal CLI session${RESET}:"
-echo -e "    ${PURPLE}omarchy-cli${RESET}   (or: ${PURPLE}./omarchy-cli.sh${RESET})\n"
-echo -e "  ${YELLOW}${BOLD}Prerequisites on Android:${RESET}"
-echo -e "    1. Install ${BOLD}Termux:X11${RESET} (from GitHub releases or F-Droid)."
-echo -e "    2. Switch to Termux:X11 after launching ${PURPLE}omarchy-gui${RESET}."
-echo -e "    3. Shortcut: ${BOLD}Super + Return${RESET} for terminal, ${BOLD}Super + d${RESET} for menu.\n"
-echo -e "${GREEN}Enjoy Omarchy on Android!${RESET}\n"
+# Termux aliases (append once)
+if ! grep -q "omarchy-termux aliases" "$HOME/.bashrc" 2>/dev/null; then
+    {
+        echo "# omarchy-termux aliases"
+        echo "alias omarchy-gui='$HOME/start-omarchy.sh'"
+        echo "alias omarchy-cli='$HOME/omarchy-cli.sh'"
+    } >> "$HOME/.bashrc"
+    log_ok "Aliases omarchy-gui / omarchy-cli added to ~/.bashrc"
+fi
+
+# --- Verification -------------------------------------------------------------
+V_ERR=0
+[ -x "$HOME/start-omarchy.sh" ]            || { log_fail "start-omarchy.sh missing"; V_ERR=1; }
+[ -f "$PROOT_ROOT/home/omarchy/.startwm" ] || { log_fail "inner ~/.startwm missing"; V_ERR=1; }
+[ -f "$PROOT_ROOT/home/omarchy/.config/i3/config" ] || { log_fail "inner i3 config missing"; V_ERR=1; }
+[ -f "$PROOT_ROOT/etc/sudoers.d/10-wheel-nopasswd" ] || { log_fail "sudoers entry missing"; V_ERR=1; }
+if command -v pm >/dev/null 2>&1; then
+    pm list packages 2>/dev/null | grep -q com.termux.x11 \
+        || log_warn "Termux:X11 APP not installed — GUI needs it: https://github.com/termux/termux-x11/releases"
+fi
+[ "$V_ERR" = "0" ] || die "Verification failed — see messages above."
+
+printf '\n%b\n' "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
+printf '%b\n'   "${GREEN}${BOLD}       INSTALLATION COMPLETE — OMARCHY READY      ${RESET}"
+printf '%b\n\n' "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
+printf '  Graphical desktop : %b   (then switch to the Termux:X11 app)\n' "${MAGENTA}${BOLD}omarchy-gui${RESET}"
+printf '  Terminal only     : %b\n\n' "${MAGENTA}${BOLD}omarchy-cli${RESET}"
+printf '  Default user      : omarchy / omarchy (passwordless sudo)\n'
+printf '  Keys              : Super+Enter terminal · Super+d launcher · Super+Shift+e exit\n\n'
+printf '%b\n' "Enjoy Omarchy on Android!"
