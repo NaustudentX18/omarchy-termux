@@ -134,9 +134,10 @@ cat > "$SB/usr/bin/git" <<STUB
 #!/bin/bash
 if [ "\$1" = "clone" ]; then
   TARGET="\${@: -1}"
-  mkdir -p "\$TARGET/bin" "\$TARGET/config"
+  mkdir -p "\$TARGET/bin" "\$TARGET/config" "\$TARGET/themes/tokyo-night/backgrounds"
   printf '#!/bin/bash\necho omarchy\n' > "\$TARGET/bin/omarchy"
   chmod +x "\$TARGET/bin/omarchy"
+  printf 'fakejpg' > "\$TARGET/themes/tokyo-night/backgrounds/5-oma-cityscape.jpg"
   exit 0
 fi
 exit 0
@@ -221,6 +222,10 @@ grep -qE '^DisableSandbox' "$ROOTFS/etc/pacman.conf" \
   && ok "pacman sandbox disabled (DisableSandbox)" || bad "DisableSandbox not set in pacman.conf"
 [ -x "$SB/usr/bin/omarchy-gui" ] && ok "omarchy-gui executable on PATH" || bad "omarchy-gui not on PATH"
 [ -x "$SB/usr/bin/omarchy-cli" ] && ok "omarchy-cli executable on PATH" || bad "omarchy-cli not on PATH"
+[ -f "$ROOTFS/home/omarchy/.local/share/omarchy/wallpaper.jpg" ] \
+  && ok "wallpaper installed from omarchy themes" || bad "wallpaper missing"
+grep -q 'feh --bg-fill' "$ROOTFS/home/omarchy/.config/i3/config" \
+  && ok "i3 sets wallpaper via feh" || bad "i3 wallpaper autostart missing"
 
 # ==============================================================================
 head_ "3. Idempotency (re-run on installed device)"

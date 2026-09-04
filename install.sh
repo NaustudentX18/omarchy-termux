@@ -372,6 +372,18 @@ STARTWM
 chmod +x "$HOME/.startwm"
 say "Session script ~/.startwm installed."
 
+# --- Wallpaper (Omarchy Tokyo Night) -------------------------------------------
+WALLPAPER_SRC=""
+for f in "$R/opt/omarchy/themes/tokyo-night/backgrounds/5-oma-cityscape.jpg" \
+         "$R/opt/omarchy/themes/tokyo-night/backgrounds/"*.jpg; do
+    [ -f "$f" ] && WALLPAPER_SRC="$f" && break
+done
+if [ -n "$WALLPAPER_SRC" ]; then
+    mkdir -p "$HOME/.local/share/omarchy"
+    cp "$WALLPAPER_SRC" "$HOME/.local/share/omarchy/wallpaper.jpg"
+    say "Wallpaper installed (Omarchy Tokyo Night)."
+fi
+
 # --- i3 window manager config --------------------------------------------------
 mkdir -p "$HOME/.config/i3"
 cat > "$HOME/.config/i3/config" << 'I3CONF'
@@ -403,8 +415,7 @@ bindsym $mod+Left focus left
 bindsym $mod+Right focus right
 bindsym $mod+Up focus up
 bindsym $mod+Down focus down
-exec --no-startup-id xsetroot -solid "#1e1e2e"
-exec --no-startup-id xterm -geometry 60x20 -fa "JetBrainsMono Nerd Font:style=Regular" -fs 12 -bg "#1e1e2e" -fg "#cdd6f4"
+exec --no-startup-id sh -c '[ -f "$HOME/.local/share/omarchy/wallpaper.jpg" ] && feh --bg-fill "$HOME/.local/share/omarchy/wallpaper.jpg" || xsetroot -solid "#1e1e2e"'
 exec --no-startup-id dunst
 
 default_border pixel 2
