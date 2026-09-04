@@ -205,22 +205,22 @@ rm -rf /etc/pacman.d/gnupg 2>/dev/null || true
 
 START_EPOCH=$(date +%s)
 _pacm_keyinit() { timeout 180 pacman-key --init; }
-_pacm_keyinit 2>&1 || { log_err "pacman-key init failed after $(( $(date +%s ) - START_EPOCH ))s"; exit 1; }
+RESULT=$(_pacm_keyinit 2>&1); RC=$?; if [ "$RC" != "0" ]; then echo "[ERR] pacman-key init failed (took $(( $(date +%s) - START_EPOCH ))s)"; exit 1; fi
 
 # C2 FIX: fatal if keyring populate fails — no cascading || true anymore
 _KEY_FAIL=0
 if [ "$(uname -m)" = "aarch64" ]; then
     pacman-key --populate archlinuxarm 2>/dev/null || _KEY_FAIL=1
-    [ "$_KEY_FAIL" = "1" ] && { log_warn "arm populate failed, trying archlinux..."; pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1; }
+    if [ "$_KEY_FAIL" = "1" ]; then echo "[WARN] arm populate failed, trying archlinux..."; pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1; fi
 else
     pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1
 fi
-[ "$_KEY_FAIL" = "1" ] && { log_err "Keyring populate failed"; exit 1; }
+if [ "$_KEY_FAIL" = "1" ]; then echo "[ERR] Keyring populate failed"; exit 1; fi
 
 # fatal on keyring sys upgrade too (C2)
 _KROK=1
 pacman -Sy --noconfirm archlinux-keyring 2>&1 || _KROK=0
-[ "$_KROK" = "0" ] && { log_err "archlinux-keyring failed"; exit 1; }
+if [ "$_KROK" = "0" ]; then echo "[ERR] archlinux-keyring failed"; exit 1; fi
 if [ "$(uname -m)" = "aarch64" ]; then
     pacman -Sy --noconfirm archlinuxarm-keyring 2>/dev/null || true
 fi
@@ -228,8 +228,10 @@ fi
 echo "==> [Arch PRoot] Upgrading system..."
 # C2: fatal on sys upgrade — do NOT silently skip 40+ packages
 _SOK=1
-pacman -Syyu --noconfirm || {_SOK=0; log_err "sys upgrade failed"; }
-[ "$_SOK" = "1" ] || { log_err "System upgrade failed"; exit 1; }
+_SOK=0
+pacman -Syyu --noconfirm
+if [ "$_SOK" = "0" ]; then echo "[ERR] sys upgrade failed"; exit 1; fi
+if [ "$_SOK" != "1" ]; then echo "[ERR] System upgrade failed"; exit 1; fi
 
 # Core tools & environment packages
 PACKAGES=(
@@ -301,7 +303,7 @@ echo "==> [Arch PRoot] Installing fonts..."
 # P1-4: repo-only fonts (removed AUR-only)
 pkgs="ttf-jetbrains-mono noto-fonts noto-fonts-emoji"
 for _p in $pkgs; do pacman -S --noconfirm --needed "$_p" 2>/dev/null || true; done
-pacman -S --noconfirm --needed ttf-cascadia-code 2>/dev/null || log_warn "ttf-cascadia-code not found"
+pacman -S --noconfirm --needed ttf-cascadia-code 2>/dev/null || echo "[WARN] ttf-cascadia-code not found (optional font)"
 fc-cache -f 2>/dev/null && echo "[fonts] Font cache rebuilt" || echo "[WARN] fc-cache failed — fonts may not render correctly"
 
 # Create user omarchy if not exists
