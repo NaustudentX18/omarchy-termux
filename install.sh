@@ -404,14 +404,14 @@ bindsym $mod+Right focus right
 bindsym $mod+Up focus up
 bindsym $mod+Down focus down
 exec --no-startup-id xsetroot -solid "#1e1e2e"
-exec --no-startup-id xterm -geometry 80x24 -bg "#1e1e2e" -fg "#cdd6f4"
+exec --no-startup-id xterm -geometry 60x20 -fa "JetBrainsMono Nerd Font:style=Regular" -fs 12 -bg "#1e1e2e" -fg "#cdd6f4"
 exec --no-startup-id dunst
 
 default_border pixel 2
 client.focused   #89b4fa #89b4fa #1e1e2e #89b4fa #89b4fa
 client.unfocused #313244 #313244 #a6adc8 #313244 #313244
+say "i3 configuration installed (mobile-size fonts)."
 I3CONF
-say "i3 configuration installed."
 say "User phase complete."
 PROVISION_USER
 
