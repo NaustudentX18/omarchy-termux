@@ -159,7 +159,8 @@ else
 fi
 
 if [ -z "$PROOT_ROOT" ] || [ ! -d "$PROOT_ROOT" ]; then
-    log_warn "Could not pinpoint rootfs directory directly; proceeding with proot-distro login commands."
+	log_err "Cannot detect Arch Linux rootfs directory. Run proot-distro install archlinux first."
+	exit 1
 fi
 
 # Ensure robust DNS before entering PRoot
@@ -190,25 +191,45 @@ nameserver 1.1.1.1
 nameserver 8.8.8.8
 DNS
 
-echo "==> [Arch PRoot] Initializing and fixing pacman keyrings..."
+echo "==> [Arch PRoot] Seeding entropy for pacman-key init..."
+# C1 FIX: seed RNG so gpg-agent doesn't hang on /dev/random (Android PRoot has no hardware RNG)
+_RNGD=0
+if command -v rngd >/dev/null 2>&1; then
+    rngd -r /dev/urandom &
+    _RNGD_PID=$!
+    sleep 5 && kill $_RNGD_PID 2>/dev/null; wait $_RNGD_PID 2>/dev/null || true
+    _RNGD=1
+fi
+[ "$_RNGD" = "0" ] && echo "[C1] NO RNGD — using kernel CSPRNG (key init may hang)" >&2
 rm -rf /etc/pacman.d/gnupg 2>/dev/null || true
-pacman-key --init
 
-# Try arm keyring first on ARM, fallback to standard archlinux
-if [[ "$(uname -m)" == "aarch64"* ]]; then
-    pacman-key --populate archlinuxarm || pacman-key --populate archlinux || true
+START_EPOCH=$(date +%s)
+_pacm_keyinit() { timeout 180 pacman-key --init; }
+_pacm_keyinit 2>&1 || { log_err "pacman-key init failed after $(( $(date +%s ) - START_EPOCH ))s"; exit 1; }
+
+# C2 FIX: fatal if keyring populate fails — no cascading || true anymore
+_KEY_FAIL=0
+if [ "$(uname -m)" = "aarch64" ]; then
+    pacman-key --populate archlinuxarm 2>/dev/null || _KEY_FAIL=1
+    [ "$_KEY_FAIL" = "1" ] && { log_warn "arm populate failed, trying archlinux..."; pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1; }
 else
-    pacman-key --populate archlinux || true
+    pacman-key --populate archlinux 2>/dev/null || _KEY_FAIL=1
+fi
+[ "$_KEY_FAIL" = "1" ] && { log_err "Keyring populate failed"; exit 1; }
+
+# fatal on keyring sys upgrade too (C2)
+_KROK=1
+pacman -Sy --noconfirm archlinux-keyring 2>&1 || _KROK=0
+[ "$_KROK" = "0" ] && { log_err "archlinux-keyring failed"; exit 1; }
+if [ "$(uname -m)" = "aarch64" ]; then
+    pacman -Sy --noconfirm archlinuxarm-keyring 2>/dev/null || true
 fi
 
-# Refresh package lists and keyring
-pacman -Sy --noconfirm archlinux-keyring || true
-if [[ "$(uname -m)" == "aarch64"* ]]; then
-    pacman -Sy --noconfirm archlinuxarm-keyring || true
-fi
-
-echo "==> [Arch PRoot] Updating system packages..."
-pacman -Syu --noconfirm || true
+echo "==> [Arch PRoot] Upgrading system..."
+# C2: fatal on sys upgrade — do NOT silently skip 40+ packages
+_SOK=1
+pacman -Syyu --noconfirm || {_SOK=0; log_err "sys upgrade failed"; }
+[ "$_SOK" = "1" ] || { log_err "System upgrade failed"; exit 1; }
 
 # Core tools & environment packages
 PACKAGES=(
@@ -258,7 +279,16 @@ done
 
 # Audio setup: pulseaudio or pipewire-pulse fallback
 echo "==> [Arch PRoot] Installing audio routing..."
-pacman -S --noconfirm --needed pulseaudio || pacman -S --noconfirm --needed pipewire-pulse || true
+_PA_OK=0
+pacman -S --noconfirm --needed pulseaudio && _PA_OK=1 || true
+if [ "$_PA_OK" != "1" ]; then
+    echo "[AUDIO] PulseAudio not found, trying pipewire-pulse..." >&2
+
+
+
+
+
+
 
 mkdir -p /etc/pulse
 cat << 'PULSE_CLIENT' > /etc/pulse/client.conf
@@ -268,15 +298,23 @@ PULSE_CLIENT
 
 # Fonts installation with robust fallbacks
 echo "==> [Arch PRoot] Installing fonts..."
-pacman -S --noconfirm --needed ttf-jetbrains-mono-nerd noto-fonts || true
-pacman -S --noconfirm --needed ttf-cascadia-code-nerd || true
-pacman -S --noconfirm --needed noto-fonts-emoji || pacman -S --noconfirm --needed ttf-joypixels || true
+# P1-4: repo-only fonts (removed AUR-only)
+pkgs="ttf-jetbrains-mono noto-fonts noto-fonts-emoji"
+for _p in $pkgs; do pacman -S --noconfirm --needed "$_p" 2>/dev/null || true; done
+pacman -S --noconfirm --needed ttf-cascadia-code 2>/dev/null || log_warn "ttf-cascadia-code not found"
+fc-cache -f 2>/dev/null && echo "[fonts] Font cache rebuilt" || echo "[WARN] fc-cache failed — fonts may not render correctly"
 
 # Create user omarchy if not exists
 USERNAME="omarchy"
 if ! id -u "$USERNAME" >/dev/null 2>&1; then
     echo "==> [Arch PRoot] Creating user: $USERNAME..."
-    useradd -m -s /bin/bash -G wheel "$USERNAME" || useradd -m -s /bin/bash "$USERNAME"
+    _UA_OK=0
+    for _uar in 1 2 3 4 5 6; do
+        if [ "$_UA_OK" = "1" ]; then break;
+    fi
+        if useradd -m -s /bin/bash -G wheel "$USERNAME" 2>/dev/null; then _UA_OK=1; fi
+        sleep 3
+    done
     echo "$USERNAME:omarchy" | chpasswd
     echo "root:root" | chpasswd
 fi
@@ -319,7 +357,13 @@ export DISPLAY=:0
 export TERM=xterm-256color
 
 # VirGL Hardware Acceleration
-export GALLIUM_DRIVER=virpipe
+# P1-5: Auto-detect VirGL (only on Qualcomm Adreno); fallback to llvmpipe
+# Detect VirGL hardware available
+if command -v virgl_test_server_android >/dev/null 2>&1 &&    virgl_test_server_android --test >/dev/null 2>&1; then
+    export GALLIUM_DRIVER=virpipe
+else
+    export GALLIUM_DRIVER=llvmpipe
+fi
 export MESA_GL_VERSION_OVERRIDE=4.0
 
 alias ll="eza -la --icons" 2>/dev/null || alias ll="ls -la"
@@ -338,13 +382,19 @@ cat << "STARTWM" > "$HOME/.startwm"
 export DISPLAY=:0
 export PULSE_SERVER=127.0.0.1
 export XDG_CURRENT_DESKTOP=i3
-export GALLIUM_DRIVER=virpipe
+# P1-5: Auto-detect VirGL (only on Qualcomm Adreno); fallback to llvmpipe
+if command -v virgl_test_server_android >/dev/null 2>&1 &&    virgl_test_server_android --test >/dev/null 2>&1; then
+    export GALLIUM_DRIVER=virpipe
+else
+    export GALLIUM_DRIVER=llvmpipe
+fi
 export MESA_GL_VERSION_OVERRIDE=4.0
 
 # Start D-Bus session
 if command -v dbus-launch >/dev/null 2>&1; then
     eval $(dbus-launch --sh-syntax)
 fi
+[ -z "$DBUS_SESSION_BUS_ADDRESS" ] && export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-/tmp/dbus}"
 
 # Start Dunst notifications
 command -v dunst >/dev/null 2>&1 && dunst &
@@ -433,12 +483,18 @@ am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity 2>/dev/null || t
 
 echo "[*] Initializing X11 display :0..."
 export DISPLAY=:0
-termux-x11 :0 -ac -legacy-drawing 2>/dev/null &
+# P0-4: detect T:X11 version — prefer -w (wayland-compat), fallback to legacy
+if termux-x11 2>&1 /dev/null | grep -q -- "-"; then
+    TXX_FLAGS="-ac -w"
+else
+    TXX_FLAGS="-ac -legacy-drawing"
+fi
+termux-x11 :0 $TXX_FLAGS 2>/dev/null &
 X11_PID=$!
 sleep 1.2
 
 echo "[*] Entering Omarchy Linux..."
-proot-distro login archlinux --user omarchy --shared-tmp -- env DISPLAY=:0 PULSE_SERVER=127.0.0.1 /home/omarchy/.startwm
+proot-distro login archlinux --user omarchy --shared-tmp -- env DISPLAY=:0 PULSE_SERVER=127.0.0.1 DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-}" /home/omarchy/.startwm
 
 # Cleanup when GUI closes
 echo "[*] Session ended. Cleaning up background services..."
@@ -452,6 +508,7 @@ chmod +x "$HOME/start-omarchy.sh"
 cat << 'CLI_LAUNCHER' > "$HOME/omarchy-cli.sh"
 #!/data/data/com.termux/files/usr/bin/bash
 export PULSE_SERVER=127.0.0.1
+export TERM=xterm-256color
 proot-distro login archlinux --user omarchy --shared-tmp
 CLI_LAUNCHER
 chmod +x "$HOME/omarchy-cli.sh"
