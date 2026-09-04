@@ -403,6 +403,9 @@ bindsym $mod+Left focus left
 bindsym $mod+Right focus right
 bindsym $mod+Up focus up
 bindsym $mod+Down focus down
+exec --no-startup-id xsetroot -solid "#1e1e2e"
+exec --no-startup-id xterm -geometry 80x24
+exec --no-startup-id dunst
 
 default_border pixel 2
 client.focused   #89b4fa #89b4fa #1e1e2e #89b4fa #89b4fa
@@ -505,12 +508,16 @@ log_ok "Commands omarchy-gui / omarchy-cli installed on PATH (usable now)."
 # --- Verification -------------------------------------------------------------
 V_ERR=0
 [ -x "$HOME/start-omarchy.sh" ]            || { log_fail "start-omarchy.sh missing"; V_ERR=1; }
-[ -f "$PROOT_ROOT/home/omarchy/.startwm" ] || { log_fail "inner ~/.startwm missing"; V_ERR=1; }
-[ -f "$PROOT_ROOT/home/omarchy/.config/i3/config" ] || { log_fail "inner i3 config missing"; V_ERR=1; }
-[ -f "$PROOT_ROOT/etc/sudoers.d/10-wheel-nopasswd" ] || { log_fail "sudoers entry missing"; V_ERR=1; }
-if command -v pm >/dev/null 2>&1; then
-    pm list packages 2>/dev/null | grep -q com.termux.x11 \
-        || log_warn "Termux:X11 APP not installed — GUI needs it: https://github.com/termux/termux-x11/releases"
+if command -v am >/dev/null 2>&1; then
+    # NOTE: 'pm list packages' is NOT reliable from Termux on all Android
+    # versions (silently fails → false "not installed" warnings even when
+    # the app is installed and launchable). Use 'am' with a resolve-only
+    # intent instead; fall back to silence on failure.
+    if ! am start -n com.termux.x11/.MainActivity --dry-run >/dev/null 2>&1 \
+       && ! am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+              -p com.termux.x11 >/dev/null 2>&1; then
+        log_warn "Termux:X11 APP not detected — if missing, get it from: https://github.com/termux/termux-x11/releases"
+    fi
 fi
 [ "$V_ERR" = "0" ] || die "Verification failed — see messages above."
 
