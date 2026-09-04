@@ -21,8 +21,6 @@ set -u
 # --- Testability: allow PREFIX/HOME override (used by tests/run-tests.sh) ----
 TERMUX_PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 PROOT_STATE_DIR="$TERMUX_PREFIX/var/lib/proot-distro"
-ROOTFS_DIR="$PROOT_STATE_DIR/installed-rootfs/archlinux"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Pretty logging -----------------------------------------------------------
 BOLD="\033[1m"; GREEN="\033[32m"; BLUE="\033[34m"; YELLOW="\033[33m"
@@ -119,23 +117,41 @@ log_ok "Termux host packages verified."
 # ==============================================================================
 log_step "Step 3/6: Bootstrapping Arch Linux (${TARGET_ARCH})"
 
-if [ -d "$ROOTFS_DIR/etc" ]; then
+# Two rootfs layouts exist across proot-distro versions:
+#   legacy/alias:  .../installed-rootfs/archlinux
+#   modern (v5+):  .../containers/archlinux/rootfs
+find_rootfs() {
+    if   [ -d "$PROOT_STATE_DIR/installed-rootfs/archlinux/etc" ]; then
+        echo "$PROOT_STATE_DIR/installed-rootfs/archlinux"
+    elif [ -d "$PROOT_STATE_DIR/containers/archlinux/rootfs/etc" ]; then
+        echo "$PROOT_STATE_DIR/containers/archlinux/rootfs"
+    fi
+}
+PROOT_ROOT="$(find_rootfs)"
+
+if [ -n "$PROOT_ROOT" ]; then
     log_ok "Existing Arch Linux rootfs found — skipping download."
 else
     log_info "Downloading & deploying Arch Linux rootfs (~140 MB)..."
-    if ! proot-distro install archlinux; then
-        # Race with a half-finished previous attempt: reset and retry once.
-        if [ -d "$ROOTFS_DIR" ]; then
-            log_warn "Rootfs appeared during install — continuing."
-        else
-            proot-distro remove archlinux >/dev/null 2>&1 || true
-            proot-distro install archlinux || die "Rootfs bootstrap failed. Check network, then re-run."
+    if [ "$TARGET_ARCH" = "aarch64" ]; then
+        # proot-distro v5+ pulls 'archlinux' from Docker Hub, which is amd64-only.
+        # Install the official Arch Linux ARM tarball from the last release
+        # that shipped it (asset still served — verified 2026-09).
+        ALARM_TARBALL="https://github.com/termux/proot-distro/releases/download/v4.17.3/archlinux-aarch64-pd-v4.17.3.tar.xz"
+        # A registered container without a rootfs dir is stale/broken — clear it.
+        proot-distro remove archlinux >/dev/null 2>&1 || true
+        if ! proot-distro install --name archlinux "$ALARM_TARBALL"; then
+            log_warn "Tarball install failed — trying distro alias (works on x86_64)..."
+            proot-distro install archlinux || true
         fi
+    else
+        proot-distro install archlinux || true
     fi
-    [ -d "$ROOTFS_DIR/etc" ] || die "Rootfs directory missing after install: $ROOTFS_DIR"
+    PROOT_ROOT="$(find_rootfs)"
+    [ -n "$PROOT_ROOT" ] || die "Rootfs bootstrap failed. Check network, then re-run.
+         Manual attempt: proot-distro install --name archlinux $ALARM_TARBALL"
     log_ok "Arch Linux base rootfs deployed."
 fi
-PROOT_ROOT="$ROOTFS_DIR"
 
 log_info "Injecting DNS resolvers (Cloudflare + Google)..."
 cat > "$PROOT_ROOT/etc/resolv.conf" << 'RESOLV_HOST'

@@ -24,8 +24,10 @@ head_(){ printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 SB="$(mktemp -d /tmp/omarchy-test.XXXXXX)"
 trap 'rm -rf "$SB"' EXIT
-ROOTFS="$SB/usr/var/lib/proot-distro/installed-rootfs/archlinux"
 mkdir -p "$SB/usr/bin" "$SB/home" "$SB/log" "$SB/state"
+ROOTFS="$SB/usr/var/lib/proot-distro/installed-rootfs/archlinux"
+LEGACY_ROOTFS="$ROOTFS"
+MODERN_ROOTFS="$SB/usr/var/lib/proot-distro/containers/archlinux/rootfs"
 
 # ------------------------------------------------------------------------------
 # Stub: pkg — fakes package install (creates dummy binaries), logs everything
@@ -56,7 +58,11 @@ cat > "$SB/usr/bin/proot-distro" <<STUB
 echo "proot-distro \$*" >> "$SB/log/pd.log"
 case "\$1" in
   install)
-    mkdir -p "$ROOTFS"/{etc/pacman.d,etc/pulse,etc/sudoers.d,root,home/omarchy,opt,usr/local/bin,tmp}
+    echo "PD-INSTALL-ARGS: \$*" >> "$SB/log/pd.log"
+    mkdir -p "$LEGACY_ROOTFS"/{etc/pacman.d,etc/pulse,etc/sudoers.d,root,home/omarchy,opt,usr/local/bin,tmp}
+    exit 0 ;;
+  remove)
+    rm -rf "$LEGACY_ROOTFS" "$SB/usr/var/lib/proot-distro/containers"
     exit 0 ;;
   login)
     shift  # drop "login"
@@ -70,15 +76,17 @@ case "\$1" in
       esac
     done
     # Remaining args: env K=V ... bash /path/script.sh — keep only the script
+    RFSDIR="$LEGACY_ROOTFS"
+    [ -d "$MODERN_ROOTFS" ] && RFSDIR="$MODERN_ROOTFS"
     SCRIPT=""
     while [ \$# -gt 0 ]; do
       case "\$1" in
-        /*) SCRIPT="\$(echo "\$1" | sed -e "s|^/root/|$ROOTFS/root/|" -e "s|^/home/omarchy|$ROOTFS/home/omarchy|")" ;;
+        /*) SCRIPT="\$(echo "\$1" | sed -e "s|^/root/|\$RFSDIR/root/|" -e "s|^/home/omarchy|\$RFSDIR/home/omarchy|")" ;;
       esac
       shift
     done
-    export OMARCHY_ROOTFS="$ROOTFS"
-    export HOME="$ROOTFS/home/omarchy"
+    export OMARCHY_ROOTFS="\$RFSDIR"
+    export HOME="\$RFSDIR/home/omarchy"
     echo "LOGIN user_mode=\$USER_MODE cmd=\$SCRIPT" >> "$SB/log/login.log"
     exec bash "\$SCRIPT"
     ;;
@@ -204,6 +212,10 @@ grep -q '1.1.1.1' "$ROOTFS/etc/resolv.conf" && ok "DNS injected into rootfs" || 
 grep -q 'user_mode=1' "$SB/log/login.log" && ok "user phase ran via --user login (no su)" || bad "user phase never ran"
 grep -q -- '-Syyu' "$SB/log/pacman.log" && ok "system upgrade invoked" || bad "no system upgrade"
 grep -q 'i3-wm' "$SB/log/pacman.log" && ok "desktop packages installed" || bad "desktop packages missing"
+grep -q 'PD-INSTALL-ARGS: install --name archlinux' "$SB/log/pd.log" \
+  && ok "aarch64 installs via official ALARM tarball (--name)" || bad "aarch64 did not use tarball install"
+grep -q 'archlinux-aarch64-pd-' "$SB/log/pd.log" \
+  && ok "tarball URL passed to proot-distro" || bad "tarball URL missing from install args"
 
 # ==============================================================================
 head_ "3. Idempotency (re-run on installed device)"
@@ -216,6 +228,17 @@ grep -q 'Existing Arch Linux rootfs found' "$SB/log/run2.out" \
   && ok "no duplicate profile on re-run" || bad "profile duplicated on re-run"
 [ "$(grep -c 'omarchy-termux aliases' "$SB/home/.bashrc" 2>/dev/null || echo 0)" = "1" ] \
   && ok "no duplicate aliases on re-run" || bad "aliases duplicated on re-run"
+
+# ==============================================================================
+head_ "3b. Modern proot-distro layout (containers/<name>/rootfs)"
+# ==============================================================================
+mkdir -p "$(dirname "$MODERN_ROOTFS")"
+mv "$ROOTFS" "$MODERN_ROOTFS"
+if run_installer > "$SB/log/run4.out" 2>&1; then ok "installer exit 0 on modern layout"; else
+  bad "modern-layout run failed — output tail:"; tail -25 "$SB/log/run4.out"; fi
+grep -q 'Existing Arch Linux rootfs found' "$SB/log/run4.out" \
+  && ok "modern containers/ layout detected (no re-download)" || bad "modern layout not detected"
+mv "$MODERN_ROOTFS" "$ROOTFS"
 
 # ==============================================================================
 head_ "4. Failure path (pacman broken → clean abort, script kept for debug)"
