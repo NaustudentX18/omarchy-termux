@@ -236,7 +236,7 @@ PACKAGES=(
     fontconfig dbus mesa mesa-utils
     xdg-user-dirs xdg-utils feh rofi xdotool xterm
     i3-wm i3status i3lock dunst picom
-    xorg-xhost xorg-xset xorg-xrdb xorg-xrandr
+    xorg-xhost xorg-xset xorg-xrdb xorg-xrandr xorg-xsetroot
 )
 say "Installing core desktop & developer packages..."
 if ! pacman -S --noconfirm --needed "${PACKAGES[@]}"; then
@@ -404,7 +404,7 @@ bindsym $mod+Right focus right
 bindsym $mod+Up focus up
 bindsym $mod+Down focus down
 exec --no-startup-id xsetroot -solid "#1e1e2e"
-exec --no-startup-id xterm -geometry 80x24
+exec --no-startup-id xterm -geometry 80x24 -bg "#1e1e2e" -fg "#cdd6f4"
 exec --no-startup-id dunst
 
 default_border pixel 2
