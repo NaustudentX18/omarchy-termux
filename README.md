@@ -115,7 +115,7 @@ copy.
 
 | Component | Version |
 |---|---|
-| omarchy-android release | v0.1.1 (pinned SHA256 in install.sh) |
+| omarchy-android release | v0.1.1 (bundle SHA256 + session-script `OA_GIT_REF` in install.sh) |
 | Termux | `0.118+` from F-Droid / GitHub |
 | Termux:X11 | nightly `v1.5+` |
 | Weston (Termux pkg) | `weston 14.0.2-1` from `x11-repo` |

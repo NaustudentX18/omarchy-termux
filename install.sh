@@ -28,10 +28,13 @@ OA_PREFIX="${OMARCHY_HOST_PREFIX:-$HOME/.local/share/omarchy-android}"
 OA_STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/$OA_CONTAINER}"
 BUNDLE="${OMARCHY_BUNDLE:-}"
 
-# Pinned release (manifest/release.lock of BlackFireAlex/omarchy-android v0.1.1)
+# Pinned release (manifest/release.lock of BlackFireAlex/omarchy-android).
+# Keep RELEASE_* and OA_GIT_REF on the same tag when bumping with Android Bundle.
 RELEASE_URL="https://github.com/BlackFireAlex/omarchy-android/releases/download/v0.1.1/omarchy-android-aarch64-0.1.1.bundle.tar"
 RELEASE_SHA256="7e9f1cd67533bc0d3988b5cb3831aef52f1527dd90391d9d868ed9345021cdb2"
 BUNDLE_ASSET="omarchy-android-aarch64-0.1.1.bundle.tar"
+OA_GIT_REPO="https://github.com/BlackFireAlex/omarchy-android.git"
+OA_GIT_REF="v0.1.1"
 
 # --- Pretty logging ------------------------------------------------------------
 BOLD="\033[1m"; GREEN="\033[32m"; BLUE="\033[34m"; YELLOW="\033[33m"
@@ -356,15 +359,32 @@ log_ok "Runtime config written ($GPU_MODE GPU, scale $UI_SCALE, $((REFRESH_MHZ/1
 # ==============================================================================
 log_step "Step 5/7: Installing session management scripts"
 
-# The start/stop/status/hyprctl scripts are upstream's runtime; pin the same
-# v0.1.1 revision the bundle was built from so host+guest always match.
+# The start/stop/status/hyprctl scripts are upstream's runtime. Always clone
+# OA_GIT_REF (same tag as RELEASE_*), never floating main tip.
 OA_GIT_DIR="$BUNDLE_DIR/omarchy-android-src"
 OA_START_SRC=""
 if command -v git >/dev/null 2>&1; then
-    if [ ! -d "$OA_GIT_DIR" ]; then
-        log_info "Fetching omarchy-android runtime scripts (shallow clone)..."
-        git clone --depth 1 https://github.com/BlackFireAlex/omarchy-android.git "$OA_GIT_DIR" 2>/dev/null \
-            || log_warn "Clone failed — will fall back to inline vendored copies."
+    need_clone=1
+    if [ -d "$OA_GIT_DIR/.git" ]; then
+        cur="$(cd "$OA_GIT_DIR" && git describe --tags --exact-match HEAD 2>/dev/null || true)"
+        if [ "$cur" = "$OA_GIT_REF" ]; then
+            need_clone=0
+            log_ok "Cached omarchy-android sources already at $OA_GIT_REF."
+        else
+            log_warn "Cached omarchy-android sources at '${cur:-unknown}' — refreshing to $OA_GIT_REF."
+            rm -rf "$OA_GIT_DIR"
+        fi
+    elif [ -d "$OA_GIT_DIR" ]; then
+        log_warn "Cached omarchy-android sources are unpinned — refreshing to $OA_GIT_REF."
+        rm -rf "$OA_GIT_DIR"
+    fi
+    if [ "$need_clone" = 1 ]; then
+        log_info "Fetching omarchy-android runtime scripts at $OA_GIT_REF..."
+        if ! git clone --depth 1 --branch "$OA_GIT_REF" \
+                "$OA_GIT_REPO" "$OA_GIT_DIR" 2>/dev/null; then
+            rm -rf "$OA_GIT_DIR"
+            log_warn "Clone of $OA_GIT_REF failed — will fall back to inline vendored copies."
+        fi
     fi
     [ -f "$OA_GIT_DIR/runtime/host/omarchy-android-start" ] && OA_START_SRC="$OA_GIT_DIR/runtime/host"
 fi
@@ -376,10 +396,10 @@ if [ -n "$OA_START_SRC" ]; then
         "$OA_START_SRC/omarchy-android-status" \
         "$OA_START_SRC/omarchy-android-hyprctl" \
         "$OA_PREFIX/bin/"
-    log_ok "Session scripts installed from omarchy-android v0.1.1 runtime."
+    log_ok "Session scripts installed from omarchy-android $OA_GIT_REF runtime."
 else
     log_warn "Could not vendor runtime scripts — the bundle lacks them.
-         Get them manually: https://github.com/BlackFireAlex/omarchy-android/tree/main/runtime/host"
+         Get them manually: https://github.com/BlackFireAlex/omarchy-android/tree/${OA_GIT_REF}/runtime/host"
 fi
 
 # The unified 'omarchy-android' dispatcher
