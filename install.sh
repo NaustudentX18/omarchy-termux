@@ -139,3 +139,78 @@ case "$ARCH" in
             KGSL build) is aarch64-only. On other devices use install-x11.sh." ;;
 esac
 log_ok "Architecture: aarch64"
+
+command -v termux-wake-lock >/dev/null 2>&1 && { termux-wake-lock || true; log_ok "Wake-lock acquired."; }
+
+# Android 12+ kills background child processes ("phantom process killer").
+# A full Omarchy session needs many processes; without the developer-options
+# override the desktop dies within ~30s of starting.
+getprop_val() {
+    if command -v getprop >/dev/null 2>&1; then
+        getprop "$1" 2>/dev/null
+    elif [ -x /system/bin/getprop ]; then
+        /system/bin/getprop "$1" 2>/dev/null
+    else
+        ""
+    fi
+}
+if [ "$(getprop_val persist.sys.fflag.override.settings_enable_monitor_phantom_procs)" = "false" ]; then
+    log_ok "Android child-process restriction: disabled (phantom processes OK)."
+else
+    log_warn "Android's phantom-process restriction appears ACTIVE.
+         A full Omarchy session will be reaped. To disable:
+           Settings → About phone → tap 'Build number' 7×  →  Developer options
+           → enable 'Disable child process restrictions'
+         Then re-run this installer (or: install anyway and fix later)."
+fi
+
+# Storage is optional (like omarchy-android: no host sharing by default).
+if [ -d "$HOME/storage/shared" ]; then
+    log_ok "Storage permission present (not used by default — sharing is opt-in)."
+else
+    log_info "Storage permission not granted (optional; sharing is opt-in)."
+fi
+
+# ==============================================================================
+# STEP 2/7 — Termux host packages
+# ==============================================================================
+log_step "Step 2/7: Installing Termux host packages"
+
+APT_OPTS=(-o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold")
+log_info "Updating package index..."
+if ! pkg update -y "${APT_OPTS[@]}"; then
+    log_warn "pkg update failed — trying apt directly..."
+    apt-get update -y || log_warn "Index update failed. If installs fail: termux-change-repo"
+fi
+pkg upgrade -y "${APT_OPTS[@]}" || log_warn "pkg upgrade had issues — continuing."
+
+# x11-repo provides weston + termux-x11-nightly; main repo provides the rest.
+log_info "Enabling the Termux X11 repository..."
+pkg install -y x11-repo "${APT_OPTS[@]}" || log_warn "x11-repo enable failed — weston/termux-x11 may be missing."
+
+HOST_PACKAGES=(proot-distro git curl wget tar pulseaudio pactl
+               weston termux-x11-nightly xorg-xwininfo
+               mesa-vulkan-icd-freedreno virglrenderer-android jq bash)
+log_info "Installing host packages: ${HOST_PACKAGES[*]}"
+for p in "${HOST_PACKAGES[@]}"; do
+    command -v "$p" >/dev/null 2>&1 && continue
+    case "$p" in
+        termux-x11-nightly) command -v termux-x11 >/dev/null 2>&1 && continue ;;
+    esac
+    pkg install -y "$p" "${APT_OPTS[@]}" || log_warn "Could not install '$p' — continuing."
+done
+# mesa-vulkan-icd-freedreno installs a binary that pkg sees under a different name
+command -v termux-x11 >/dev/null 2>&1 \
+    || pkg install -y termux-x11-nightly "${APT_OPTS[@]}" \
+    || log_warn "termux-x11 missing — GUI cannot start without it."
+
+MISSING=""
+for p in proot-distro termux-x11 weston pulseaudio xwininfo sha256sum; do
+    command -v "$p" >/dev/null 2>&1 || MISSING="$MISSING $p"
+done
+[ -z "$MISSING" ] || die "Required host commands still missing:$MISSING
+         Fix with: pkg install$MISSING   then re-run."
+log_ok "Termux host packages ready."
+
+# ==============================================================================
+# STEP 3/7 — Fetch & verify the omarchy-android release bundle
