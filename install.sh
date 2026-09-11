@@ -45,3 +45,132 @@ log_warn() { printf '%b\n' "${YELLOW}${BOLD}[!]${RESET} $*"; }
 log_fail() { printf '%b\n' "${RED}${BOLD}[✗]${RESET} $*"; }
 log_step() { printf '\n%b\n' "${CYAN}${BOLD}==>${RESET} ${BOLD}$*${RESET}"; }
 die() { log_fail "$*"; exit 1; }
+
+getprop_val() {
+    if command -v getprop >/dev/null 2>&1; then
+        getprop "$1" 2>/dev/null
+    elif [ -x /system/bin/getprop ]; then
+        /system/bin/getprop "$1" 2>/dev/null
+    else
+        printf ''
+    fi
+}
+
+# --- doctor subcommand: inspect host readiness, change nothing -----------------
+run_doctor() {
+    local failures=0
+    printf '%-22s %-6s %s\n' "CHECK" "RESULT" "DETAIL"
+    check() { printf '%-22s %-6s %s\n' "$1" "$2" "$3"; }
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -d /data/data/com.termux ]; then
+        check "Termux" PASS "PREFIX=${TERMUX_PREFIX}"
+    else check "Termux" FAIL "not in Termux"; failures=$((failures+1)); fi
+    case "$(uname -m)" in
+        aarch64|arm64) check "Architecture" PASS "$(uname -m)" ;;
+        *) check "Architecture" FAIL "$(uname -m) (aarch64 required)"; failures=$((failures+1)) ;;
+    esac
+    for cmd in proot-distro termux-x11 weston pulseaudio xwininfo curl sha256sum; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            check "$cmd" PASS "$(command -v "$cmd")"
+        else
+            check "$cmd" MISS "install with: pkg install $cmd"
+            failures=$((failures+1))
+        fi
+    done
+    if [ -r /dev/kgsl-3d0 ] && [ -w /dev/kgsl-3d0 ]; then
+        check "Adreno KGSL" PASS "/dev/kgsl-3d0 read+write -> direct GPU accel"
+    else
+        check "Adreno KGSL" WARN "absent -> VirGL software fallback"
+    fi
+    if [ "$(getprop_val persist.sys.fflag.override.settings_enable_monitor_phantom_procs)" = "false" ]; then
+        check "Phantom processes" PASS "child-process restriction disabled"
+    else
+        check "Phantom processes" FAIL "enable Developer options -> 'Disable child process restrictions'"
+        failures=$((failures+1))
+    fi
+    if command -v am >/dev/null 2>&1; then
+        if am start -n com.termux.x11/.MainActivity --dry-run >/dev/null 2>&1 || \
+           am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p com.termux.x11 >/dev/null 2>&1; then
+            check "Termux:X11 app" PASS "installed"
+        else
+            check "Termux:X11 app" WARN "not detected - install NIGHTLY APK (github.com/termux/termux-x11/releases)"
+        fi
+    else
+        check "Termux:X11 app" WARN "cannot probe without 'am'"
+    fi
+    if [ -f "$OA_PREFIX/config/runtime.conf" ]; then
+        check "omarchy-termux" PASS "runtime installed at $OA_PREFIX"
+    else
+        check "omarchy-termux" MISS "not installed yet - run this installer"
+    fi
+    echo
+    if [ "$failures" = 0 ]; then log_ok "Doctor: all required checks passed."
+    else die "Doctor: $failures required check(s) failing."; fi
+    exit 0
+}
+[ "${1:-}" = "doctor" ] && run_doctor
+
+banner() {
+    cat << "BANNER_TXT"
+  ___  __  __   _   ___  ___ _  ___   __
+ / _ \|  \/  | /_\ | _ \/ __| || \ \ / /
+| (_) | |\/| |/ _ \|   / (__| __ |\ V /
+ \___/|_|  |_/_/ \_\_|_\\___|_||_| |_|
+     Android Termux Edition — native parity
+BANNER_TXT
+    printf '%b\n' "${MAGENTA}  The real Omarchy: Hyprland + Omarchy Shell on Android (PRoot)${RESET}"
+    printf '\n'
+}
+banner
+
+# ==============================================================================
+# STEP 1/7 — Preflight: Termux, arch, Android, phantom processes, storage
+# ==============================================================================
+log_step "Step 1/7: Preflight (run '$0 doctor' for details anytime)"
+
+if [ -z "${TERMUX_VERSION:-}" ] && [ ! -d "/data/data/com.termux" ]; then
+    die "This installer must run inside Termux on Android.
+         Install Termux from F-Droid: https://f-droid.org/en/packages/com.termux/"
+fi
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+    aarch64|arm64) ;;
+    *) die "Unsupported architecture: $ARCH. The native-parity stack (Hyprland
+            KGSL build) is aarch64-only. On other devices use install-x11.sh." ;;
+esac
+log_ok "Architecture: aarch64"
+
+command -v termux-wake-lock >/dev/null 2>&1 && { termux-wake-lock || true; log_ok "Wake-lock acquired."; }
+
+# Android 12+ kills background child processes ("phantom process killer").
+# A full Omarchy session needs many processes; without the developer-options
+# override the desktop dies within ~30s of starting.
+getprop_val() {
+    if command -v getprop >/dev/null 2>&1; then
+        getprop "$1" 2>/dev/null
+    elif [ -x /system/bin/getprop ]; then
+        /system/bin/getprop "$1" 2>/dev/null
+    else
+        ""
+    fi
+}
+if [ "$(getprop_val persist.sys.fflag.override.settings_enable_monitor_phantom_procs)" = "false" ]; then
+    log_ok "Android child-process restriction: disabled (phantom processes OK)."
+else
+    log_warn "Android's phantom-process restriction appears ACTIVE.
+         A full Omarchy session will be reaped. To disable:
+           Settings → About phone → tap 'Build number' 7×  →  Developer options
+           → enable 'Disable child process restrictions'
+         Then re-run this installer (or: install anyway and fix later)."
+fi
+
+# Storage is optional (like omarchy-android: no host sharing by default).
+if [ -d "$HOME/storage/shared" ]; then
+    log_ok "Storage permission present (not used by default — sharing is opt-in)."
+else
+    log_info "Storage permission not granted (optional; sharing is opt-in)."
+fi
+
+# ==============================================================================
+# STEP 2/7 — Termux host packages
+# ==============================================================================
