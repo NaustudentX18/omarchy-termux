@@ -174,3 +174,94 @@ fi
 # ==============================================================================
 # STEP 2/7 — Termux host packages
 # ==============================================================================
+log_step "Step 2/7: Installing Termux host packages"
+
+APT_OPTS=(-o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold")
+log_info "Updating package index..."
+if ! pkg update -y "${APT_OPTS[@]}"; then
+    log_warn "pkg update failed — trying apt directly..."
+    apt-get update -y || log_warn "Index update failed. If installs fail: termux-change-repo"
+fi
+pkg upgrade -y "${APT_OPTS[@]}" || log_warn "pkg upgrade had issues — continuing."
+
+# x11-repo provides weston + termux-x11-nightly; main repo provides the rest.
+log_info "Enabling the Termux X11 repository..."
+pkg install -y x11-repo "${APT_OPTS[@]}" || log_warn "x11-repo enable failed — weston/termux-x11 may be missing."
+
+HOST_PACKAGES=(proot-distro git curl wget tar pulseaudio pactl
+               weston termux-x11-nightly xorg-xwininfo
+               mesa-vulkan-icd-freedreno virglrenderer-android jq bash)
+log_info "Installing host packages: ${HOST_PACKAGES[*]}"
+for p in "${HOST_PACKAGES[@]}"; do
+    command -v "$p" >/dev/null 2>&1 && continue
+    case "$p" in
+        termux-x11-nightly) command -v termux-x11 >/dev/null 2>&1 && continue ;;
+    esac
+    pkg install -y "$p" "${APT_OPTS[@]}" || log_warn "Could not install '$p' — continuing."
+done
+# mesa-vulkan-icd-freedreno installs a binary that pkg sees under a different name
+command -v termux-x11 >/dev/null 2>&1 \
+    || pkg install -y termux-x11-nightly "${APT_OPTS[@]}" \
+    || log_warn "termux-x11 missing — GUI cannot start without it."
+
+MISSING=""
+for p in proot-distro termux-x11 weston pulseaudio xwininfo sha256sum; do
+    command -v "$p" >/dev/null 2>&1 || MISSING="$MISSING $p"
+done
+[ -z "$MISSING" ] || die "Required host commands still missing:$MISSING
+         Fix with: pkg install$MISSING   then re-run."
+log_ok "Termux host packages ready."
+
+# ==============================================================================
+# STEP 3/7 — Fetch & verify the omarchy-android release bundle
+# ==============================================================================
+log_step "Step 3/7: Fetching verified Omarchy ARM64 release bundle (~1.1 GB)"
+
+BUNDLE_DIR="$HOME/.cache/omarchy-termux"
+mkdir -p "$BUNDLE_DIR"
+BUNDLE_PATH="$BUNDLE_DIR/$BUNDLE_ASSET"
+
+if [ -n "$BUNDLE" ] && [ -f "$BUNDLE" ]; then
+    log_info "Using local bundle: $BUNDLE"
+    BUNDLE_PATH="$BUNDLE"
+else
+    NEED_DL=1
+    if [ -f "$BUNDLE_PATH" ]; then
+        log_info "Found cached bundle — verifying checksum..."
+        ACTUAL="$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
+        if [ "$ACTUAL" = "$RELEASE_SHA256" ]; then
+            NEED_DL=0
+            log_ok "Cached bundle checksum OK — skipping download."
+        else
+            log_warn "Cached bundle checksum mismatch — re-downloading."
+        fi
+    fi
+    if [ "$NEED_DL" = "1" ]; then
+        log_info "Downloading release bundle (one-time, ~1.1 GB)..."
+        if ! curl --fail --location --retry 3 --progress-bar \
+              --output "$BUNDLE_PATH" "$RELEASE_URL"; then
+            rm -f "$BUNDLE_PATH"
+            die "Release download failed. Check network and re-run the installer."
+        fi
+    fi
+fi
+
+ACTUAL="$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
+[ "$ACTUAL" = "$RELEASE_SHA256" ] || die "Bundle checksum mismatch.
+         expected $RELEASE_SHA256
+         actual   $ACTUAL
+         Delete $BUNDLE_PATH and re-run, or pass a local file: OMARCHY_BUNDLE=<path> $0"
+log_ok "Bundle verified (sha256 OK)."
+
+# ==============================================================================
+# STEP 4/7 — Extract bundle & deploy rootfs + host runtime
+# ==============================================================================
+log_step "Step 4/7: Deploying Omarchy rootfs & host runtime"
+
+UNPACK="$BUNDLE_DIR/unpacked"
+rm -rf "$UNPACK"
+mkdir -p "$UNPACK"
+
+# Path-safety scan before extraction (never trust tar members blindly)
+if tar -tf "$BUNDLE_PATH" | grep -qE '^(/|\.\./|/\.\./|\.\.(/|$))'; then
+    die "Unsafe path in release bundle — refusing to extract."
