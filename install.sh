@@ -35,3 +35,13 @@ RELEASE_SHA256="7e9f1cd67533bc0d3988b5cb3831aef52f1527dd90391d9d868ed9345021cdb2
 BUNDLE_ASSET="omarchy-android-aarch64-0.1.1.bundle.tar"
 OA_GIT_REPO="https://github.com/BlackFireAlex/omarchy-android.git"
 OA_GIT_REF="v0.1.1"
+
+# --- Pretty logging ------------------------------------------------------------
+BOLD="\033[1m"; GREEN="\033[32m"; BLUE="\033[34m"; YELLOW="\033[33m"
+RED="\033[31m"; CYAN="\033[36m"; MAGENTA="\033[35m"; RESET="\033[0m"
+log_info() { printf '%b\n' "${BLUE}${BOLD}[*]${RESET} $*"; }
+log_ok()   { printf '%b\n' "${GREEN}${BOLD}[✓]${RESET} $*"; }
+log_warn() { printf '%b\n' "${YELLOW}${BOLD}[!]${RESET} $*"; }
+log_fail() { printf '%b\n' "${RED}${BOLD}[✗]${RESET} $*"; }
+log_step() { printf '\n%b\n' "${CYAN}${BOLD}==>${RESET} ${BOLD}$*${RESET}"; }
+die() { log_fail "$*"; exit 1; }
