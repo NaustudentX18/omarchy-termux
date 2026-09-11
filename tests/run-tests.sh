@@ -208,16 +208,34 @@ exit 1
 STUB
 chmod +x "$SB/usr/bin/curl"
 
-# Fake runtime scripts repo (upstream clone): pre-seed the git clone target
-mkdir -p "$HOME/.cache/omarchy-termux/omarchy-android-src/runtime/host"
+# Fake runtime scripts repo pinned at OA_GIT_REF (v0.1.1): pre-seed .git + scripts
+# so the installer accepts the cache without hitting the network.
+OA_SRC="$HOME/.cache/omarchy-termux/omarchy-android-src"
+mkdir -p "$OA_SRC/runtime/host" "$OA_SRC/.git"
 for f in omarchy-android-start omarchy-android-stop omarchy-android-status omarchy-android-hyprctl; do
-  printf '#!/usr/bin/env bash\necho "fake %s"\n' "\$f" > "$HOME/.cache/omarchy-termux/omarchy-android-src/runtime/host/$f"
-  chmod +x "$HOME/.cache/omarchy-termux/omarchy-android-src/runtime/host/$f"
+  printf '#!/usr/bin/env bash\necho "fake %s"\n' "$f" > "$OA_SRC/runtime/host/$f"
+  chmod +x "$OA_SRC/runtime/host/$f"
 done
-# and make git a no-op success so the clone step short-circuits on existing dir
+# git stub: describe reports the pin; clone materializes the prebuilt host scripts
 cat > "$SB/usr/bin/git" <<STUB
 #!/bin/bash
-exit 0
+echo "git \$*" >> "$SB/log/git.log"
+case "\$1" in
+  describe)
+    # Exact-match tag check used by install.sh pin validation
+    printf '%s\n' "v0.1.1"
+    exit 0 ;;
+  clone)
+    # git clone --depth 1 --branch REF REPO DEST
+    dest="\${@: -1}"
+    mkdir -p "\$dest/runtime/host" "\$dest/.git"
+    for f in omarchy-android-start omarchy-android-stop omarchy-android-status omarchy-android-hyprctl; do
+      printf '#!/usr/bin/env bash\necho "fake %s"\n' "\$f" > "\$dest/runtime/host/\$f"
+      chmod +x "\$dest/runtime/host/\$f"
+    done
+    exit 0 ;;
+  *) exit 0 ;;
+esac
 STUB
 chmod +x "$SB/usr/bin/git"
 
@@ -231,6 +249,10 @@ grep -q "BlackFireAlex/omarchy-android" "$INSTALLER" \
   && ok "credits upstream omarchy-android" || bad "missing upstream credit"
 grep -qE "RELEASE_SHA256=\"[0-9a-f]{64}\"" "$INSTALLER" \
   && ok "release sha256 pinned" || bad "release sha256 not pinned"
+grep -qE 'OA_GIT_REF="v0\.1\.1"' "$INSTALLER" \
+  && ok "session-script git ref pinned to v0.1.1" || bad "OA_GIT_REF not pinned"
+grep -q -- '--branch "$OA_GIT_REF"' "$INSTALLER" \
+  && ok "clone uses --branch \$OA_GIT_REF" || bad "clone not pinned to OA_GIT_REF"
 grep -q "sha256sum -c SHA256SUMS" "$INSTALLER" \
   && ok "bundle inner checksums verified" || bad "no SHA256SUMS verification"
 grep -q "omarchy-gui" "$INSTALLER" && ok "omarchy-gui launcher wired" || bad "no omarchy-gui"
