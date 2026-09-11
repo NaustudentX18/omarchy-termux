@@ -442,3 +442,87 @@ cat > "$HOME/omarchy-cli.sh" << CLI_LAUNCHER
 export PULSE_SERVER="\${PULSE_SERVER:-tcp:127.0.0.1:4715}"
 exec proot-distro login "$OA_CONTAINER" --user omarchy
 CLI_LAUNCHER
+chmod 0755 "$HOME/omarchy-cli.sh"
+
+# Real executables on PATH
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s "$@"\n' "$HOME/start-omarchy.sh" \
+    > "$TERMUX_PREFIX/bin/omarchy-gui" && chmod 0755 "$TERMUX_PREFIX/bin/omarchy-gui"
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s "$@"\n' "$HOME/omarchy-cli.sh" \
+    > "$TERMUX_PREFIX/bin/omarchy-cli" && chmod 0755 "$TERMUX_PREFIX/bin/omarchy-cli"
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec %s "$@"\n' "$HOME/stop-omarchy.sh" \
+    > "$TERMUX_PREFIX/bin/omarchy-stop" && chmod 0755 "$TERMUX_PREFIX/bin/omarchy-stop"
+log_ok "Commands installed: omarchy-gui · omarchy-cli · omarchy-stop"
+
+# Termux:Widget home-screen shortcut
+if [ -d "$HOME/.shortcuts" ] || command -v termux-widget >/dev/null 2>&1; then
+    mkdir -p "$HOME/.shortcuts"
+    printf '#!/data/data/com.termux/files/usr/bin/bash\n%s\n' "$HOME/start-omarchy.sh" \
+        > "$HOME/.shortcuts/Omarchy" && chmod 0755 "$HOME/.shortcuts/Omarchy"
+    log_ok "Termux:Widget shortcut created (~/.shortcuts/Omarchy)."
+fi
+
+if ! grep -q "omarchy-termux aliases" "$HOME/.bashrc" 2>/dev/null; then
+    {
+        echo "# omarchy-termux aliases"
+        echo "alias omarchy-gui='$HOME/start-omarchy.sh'"
+        echo "alias omarchy-cli='$HOME/omarchy-cli.sh'"
+    } >> "$HOME/.bashrc"
+    log_ok "Aliases added to ~/.bashrc"
+fi
+
+# ==============================================================================
+# STEP 7/7 — Verification
+# ==============================================================================
+log_step "Step 7/7: Verifying installation"
+
+V_ERR=0
+[ -x "$OA_PREFIX/bin/omarchy-android" ] || { log_fail "dispatcher missing"; V_ERR=1; }
+[ -f "$OA_PREFIX/config/runtime.conf" ] || { log_fail "runtime.conf missing"; V_ERR=1; }
+[ -f "$OA_PREFIX/opt/weston/lib/libweston-14/x11-backend.so" ] || { log_fail "patched Weston backend missing"; V_ERR=1; }
+[ -d "$ROOTFS/opt/omarchy-android/hyprland" ] || { log_fail "Hyprland stage missing in guest"; V_ERR=1; }
+[ -d "$ROOTFS/usr/share/omarchy" ] || { log_fail "/usr/share/omarchy missing in guest"; V_ERR=1; }
+[ -f "$ROOTFS/home/omarchy/.config/hypr/hyprland.lua" ] || { log_fail "guest Hyprland config missing"; V_ERR=1; }
+
+# Termux:X11 app presence check (am resolve; silence when inconclusive)
+if command -v am >/dev/null 2>&1; then
+    if ! am start -n com.termux.x11/.MainActivity --dry-run >/dev/null 2>&1 \
+       && ! am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+              -p com.termux.x11 >/dev/null 2>&1; then
+        log_warn "Termux:X11 APP not detected — install the NIGHTLY APK:
+         https://github.com/termux/termux-x11/releases/tag/nightly"
+    else
+        log_ok "Termux:X11 app present."
+    fi
+else
+    log_warn "Cannot probe for Termux:X11 app (no 'am') — install the NIGHTLY APK:
+         https://github.com/termux/termux-x11/releases/tag/nightly"
+fi
+
+[ "$V_ERR" = "0" ] || die "Verification failed — see messages above."
+
+# Guest smoke test (fast, non-GUI): confirm the prebuilt stack is intact
+log_info "Guest smoke test (prebuilt Omarchy stack)..."
+if ! proot-distro login "$OA_CONTAINER" --user omarchy -- bash --noprofile --norc -euc '
+    test -f /etc/omarchy-android-release
+    test -x /opt/omarchy-android/hyprland/bin/Hyprland
+    command -v quickshell >/dev/null
+    command -v foot >/dev/null
+    command -v nautilus >/dev/null
+    test -f /usr/share/omarchy/shell/shell.qml
+    test -s "$HOME/.local/state/omarchy/current/theme.name"
+' 2>/dev/null; then
+    die "Guest smoke test failed — the container did not pass omarchy integrity checks."
+fi
+log_ok "Guest smoke test passed: Hyprland · Omarchy Shell · Foot · theme all present."
+
+printf '\n%b\n' "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
+printf '%b\n'   "${GREEN}${BOLD}   INSTALLATION COMPLETE — NATIVE-PARITY OMARCHY    ${RESET}"
+printf '%b\n\n' "${GREEN}${BOLD}════════════════════════════════════════════════${RESET}"
+printf '  Start desktop : %b   (switch to the Termux:X11 app when it opens)\n' "${MAGENTA}${BOLD}omarchy-gui${RESET}"
+printf '  Stop desktop  : %b\n' "${MAGENTA}${BOLD}omarchy-stop${RESET}"
+printf '  Terminal only : %b\n' "${MAGENTA}${BOLD}omarchy-cli${RESET}\n"
+printf '  Status        : %b status\n' "${MAGENTA}${BOLD}omarchy-gui${RESET}"
+printf '\n  This is the REAL Omarchy: Hyprland + Omarchy Shell (bar, menu,\n'
+printf '  notifications) + Foot + Nautilus + Chromium, Tokyo Night themed.\n'
+printf '  GPU: %s · scale %s · first start takes ~20-30s to warm up.\n\n' "$GPU_MODE" "$UI_SCALE"
+printf '%b\n' "Enjoy Omarchy on Android!"
