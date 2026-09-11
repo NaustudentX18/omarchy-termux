@@ -214,3 +214,113 @@ log_ok "Termux host packages ready."
 
 # ==============================================================================
 # STEP 3/7 — Fetch & verify the omarchy-android release bundle
+# ==============================================================================
+log_step "Step 3/7: Fetching verified Omarchy ARM64 release bundle (~1.1 GB)"
+
+BUNDLE_DIR="$HOME/.cache/omarchy-termux"
+mkdir -p "$BUNDLE_DIR"
+BUNDLE_PATH="$BUNDLE_DIR/$BUNDLE_ASSET"
+
+if [ -n "$BUNDLE" ] && [ -f "$BUNDLE" ]; then
+    log_info "Using local bundle: $BUNDLE"
+    BUNDLE_PATH="$BUNDLE"
+else
+    NEED_DL=1
+    if [ -f "$BUNDLE_PATH" ]; then
+        log_info "Found cached bundle — verifying checksum..."
+        ACTUAL="$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
+        if [ "$ACTUAL" = "$RELEASE_SHA256" ]; then
+            NEED_DL=0
+            log_ok "Cached bundle checksum OK — skipping download."
+        else
+            log_warn "Cached bundle checksum mismatch — re-downloading."
+        fi
+    fi
+    if [ "$NEED_DL" = "1" ]; then
+        log_info "Downloading release bundle (one-time, ~1.1 GB)..."
+        if ! curl --fail --location --retry 3 --progress-bar \
+              --output "$BUNDLE_PATH" "$RELEASE_URL"; then
+            rm -f "$BUNDLE_PATH"
+            die "Release download failed. Check network and re-run the installer."
+        fi
+    fi
+fi
+
+ACTUAL="$(sha256sum "$BUNDLE_PATH" | awk '{print $1}')"
+[ "$ACTUAL" = "$RELEASE_SHA256" ] || die "Bundle checksum mismatch.
+         expected $RELEASE_SHA256
+         actual   $ACTUAL
+         Delete $BUNDLE_PATH and re-run, or pass a local file: OMARCHY_BUNDLE=<path> $0"
+log_ok "Bundle verified (sha256 OK)."
+
+# ==============================================================================
+# STEP 4/7 — Extract bundle & deploy rootfs + host runtime
+# ==============================================================================
+log_step "Step 4/7: Deploying Omarchy rootfs & host runtime"
+
+UNPACK="$BUNDLE_DIR/unpacked"
+rm -rf "$UNPACK"
+mkdir -p "$UNPACK"
+
+# Path-safety scan before extraction (never trust tar members blindly)
+if tar -tf "$BUNDLE_PATH" | grep -qE '^(/|\.\./|/\.\./|\.\.(/|$))'; then
+    die "Unsafe path in release bundle — refusing to extract."
+fi
+tar -xf "$BUNDLE_PATH" -C "$UNPACK" || die "Bundle extraction failed."
+
+[ -f "$UNPACK/SHA256SUMS" ] || die "Bundle integrity file SHA256SUMS missing."
+( cd "$UNPACK" && sha256sum -c SHA256SUMS --quiet ) \
+    || die "Bundle inner checksums failed — the download is corrupt. Delete and re-run."
+log_ok "Bundle contents verified (SHA256SUMS)."
+
+[ -f "$UNPACK/rootfs.tar.xz" ] || die "Bundle rootfs missing."
+[ -f "$UNPACK/host/opt/weston/lib/libweston-14/x11-backend.so" ] || die "Patched Weston backend missing from bundle."
+
+# Container already installed? Keep idempotent: leave it alone, just rewire.
+find_rootfs() {
+    if [ -d "$PROOT_STATE_DIR/containers/$OA_CONTAINER/rootfs/home" ]; then
+        echo "$PROOT_STATE_DIR/containers/$OA_CONTAINER/rootfs"
+    elif [ -d "$PROOT_STATE_DIR/installed-rootfs/$OA_CONTAINER/rootfs/home" ] 2>/dev/null; then
+        echo "$PROOT_STATE_DIR/installed-rootfs/$OA_CONTAINER/rootfs"
+    fi
+}
+ROOTFS="$(find_rootfs)"
+
+if [ -n "$ROOTFS" ]; then
+    log_ok "Container '$OA_CONTAINER' already installed — skipping rootfs deploy."
+else
+    log_info "Creating PRoot container '$OA_CONTAINER' (prebuilt Omarchy rootfs)..."
+    # Register stale/broken entries out of the way first
+    if proot-distro list 2>/dev/null | grep -q "$OA_CONTAINER" && \
+       [ ! -d "$PROOT_STATE_DIR/containers/$OA_CONTAINER/rootfs/home" ] && \
+       [ ! -d "$PROOT_STATE_DIR/installed-rootfs/$OA_CONTAINER/rootfs/home" ] 2>/dev/null; then
+        proot-distro remove "$OA_CONTAINER" >/dev/null 2>&1 || true
+    fi
+    if ! proot-distro install --name "$OA_CONTAINER" --architecture aarch64 \
+            "$UNPACK/rootfs.tar.xz"; then
+        die "proot-distro install failed. Free up storage (need ~8 GB free) and re-run."
+    fi
+    ROOTFS="$(find_rootfs)"
+    [ -n "$ROOTFS" ] || die "Rootfs did not appear after install — check proot-distro output."
+    log_ok "Omarchy rootfs deployed (user: omarchy, real Omarchy Shell included)."
+fi
+
+# The runtime bind-mounts Termux's private /run onto the guest
+install -d -m 0755 "$ROOTFS/run/user/1000" 2>/dev/null || \
+    log_warn "Could not create $ROOTFS/run/user/1000 (non-root). Runtime may handle it."
+
+# --- Host runtime: launchers + patched Weston module --------------------------
+log_info "Installing host runtime (launchers, patched Weston X11 backend)..."
+install -d -m 0755 "$OA_PREFIX/bin" "$OA_PREFIX/config" \
+                    "$OA_PREFIX/opt/weston/lib/libweston-14"
+install -m 0755 \
+    "$UNPACK/host/bin/omarchy-process-guard" \
+    "$UNPACK/host/bin/omarchy-x11-keyboard" \
+    "$OA_PREFIX/bin/" 2>/dev/null || log_warn "Host helper binaries missing from bundle — continuing (they are optional)."
+install -m 0755 \
+    "$UNPACK/host/opt/weston/lib/libweston-14/x11-backend.so" \
+    "$OA_PREFIX/opt/weston/lib/libweston-14/x11-backend.so"
+
+# GPU mode auto-detect: KGSL needs /dev/kgsl-3d0 read+write
+GPU_MODE="${OMARCHY_GPU_MODE:-auto}"
+if [ "$GPU_MODE" = "auto" ]; then
