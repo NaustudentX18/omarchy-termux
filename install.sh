@@ -1,1 +1,1 @@
-@/workspace/omarchy-termux-pin/install.sh
+PLACEHOLDER_WILL_REPLACE
